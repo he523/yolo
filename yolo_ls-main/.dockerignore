@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+
+# 测试数据（太大）
+data/*.db
+videos/*.mp4
+videos/*.avi
+
+# 文档
+*.doc
+*.docx
+*.pdf
+README.md

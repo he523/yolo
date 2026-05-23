@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  traffic-analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-analysis:latest
+    container_name: traffic-analysis
+
+    # GPU 支持
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # 环境变量
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - QT_X11_NO_MITSHM=1
+
+    # 挂载卷
+    volumes:
+      # X11 socket（GUI 显示）
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # 数据持久化
+      - ./data:/app/data
+      # 模型文件
+      - ./models:/app/models
+      # 视频文件（可选）
+      - ./videos:/app/videos
+
+    # 网络模式
+    network_mode: host
+
+    # 设备访问
+    devices:
+      # 摄像头
+      - /dev/video0:/dev/video0
+
+    # 权限
+    privileged: true
+
+    # 交互模式
+    stdin_open: true
+    tty: true
+
+  # 仅命令行模式（无 GUI）
+  traffic-analysis-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-analysis:latest
+    container_name: traffic-analysis-cli
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./videos:/app/videos
+
+    command: ["python3", "main.py", "--source", "/app/videos/test.mp4", "--headless"]
+
+    profiles:
+      - cli

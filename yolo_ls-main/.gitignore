@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# PyTorch models
+*.pt
+*.pth
+*.onnx
+models/*.pt
+models/*.pth
+
+# Data
+data/
+datasets/
+*.mp4
+*.avi
+*.mov
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Training outputs
+runs/
+experiments/
+
+# Database
+*.db
+*.sqlite
+
+# Config with secrets
+config/local.yaml
+.env
+.ace-tool/
+venv_yolo/

@@ -1,0 +1,118 @@
+# 系统配置
+system:
+  device: "cuda"  # cuda 或 cpu
+  log_level: "INFO"
+
+# 性能优化（FPS 监控 + 自适应降级）
+performance:
+  enabled: true
+  target_fps: 15
+  warmup_frames: 45          # 启动/OCR 加载阶段不触发降级
+  low_fps_checks: 5          # 连续 N 次低于阈值才升一级（避免连跳 L1→L3）
+  dynamic_resolution: true   # 负载高时自动降低 detector.imgsz
+  frame_skip: 1            # 降级时可达 2~3（跳帧处理）
+  onnx_runtime: false      # 预留：导出 ONNX 后用 onnxruntime 推理
+  tensorrt: false          # 预留：TensorRT 加速（需额外导出与依赖）
+
+# 视频输入配置
+video:
+  source: "0"  # 摄像头ID、RTSP地址或视频文件路径
+  fps: 15
+  width: 1280
+  height: 720
+  resize: [640, 640]
+
+# YOLO 检测配置
+detector:
+  model_path: "models/yolo12n_vehicle.pt"  # 训练后的车辆检测模型
+  confidence: 0.2
+  iou_threshold: 0.45
+  # 远处小目标增强：更高推理分辨率 + 自适应切片兜底
+  imgsz: 768           # 实时优先建议 640/768；越大越准但更慢
+  max_det: 300
+  enable_tiling: false # 切片会明显变慢；需要远处小车更准再打开
+  tiling_mode: strip   # strip=仅上半幅(快) / full=完整网格(慢)
+  tiling_interval: 5   # 切片兜底最少间隔帧数
+  tiling_grid: [2, 2]
+  tiling_overlap: 0.20
+  tiling_min_dets: 10
+  fallback_model: yolo12n.pt  # 自定义权重缺失时使用
+  # 性能优化：上下文检测会额外跑检测（人/信号灯），实时场景建议关闭
+  enable_context_detection: false
+  classes: [0, 1, 2, 3, 5]  # 3wheeler, bike, bus, car, truck (排除 person)
+  device: "cuda"
+
+# ByteTrack 跟踪配置
+tracker:
+  track_thresh: 0.5
+  track_buffer: 30
+  match_thresh: 0.8
+  min_box_area: 10
+
+# 特征分析配置
+feature:
+  speed_threshold: 60  # km/h 超速阈值
+  pixel_to_meter: 0.05  # 像素到米的转换系数（需标定）
+  fps: 15
+
+# 违规检测配置
+violation:
+  red_light_enabled: true
+  speeding_enabled: true
+  wrong_way_enabled: true
+  illegal_lane_enabled: true
+  expected_flow_direction: south  # 合法车流主方向 north/south/east/west 等
+  lane_change_lateral_px: 80
+  lane_change_min_speed_kmh: 15
+  speed_limit: 60  # km/h
+  emergency_distance: 300
+  snapshot_dir: data/snapshots
+  # 默认停止线大致位置（以 1280x720 场景为例，可根据实际画面调整）
+  stop_line:
+    y: 430
+    x_start: 200
+    x_end: 1100
+
+# OCR 配置
+ocr:
+  model_path: "models/plate_ocr.pt"  # CRNN 车牌识别模型
+  use_gpu: true
+  enabled: true           # 关闭可跳过 PaddleOCR，显著减轻启动负担
+  paddle_mobile: true     # 使用 PP-OCRv4 mobile，避免 server 大模型
+  interval: 10            # 每 N 帧识别一次（调度器优先未识别车辆）
+  min_bbox_height: 40     # 车辆框高度小于该值时跳过（远处太小基本识别不到）
+  max_vehicles_per_frame: 5  # 每次最多识别几辆车，避免卡顿
+
+# 数据库配置
+database:
+  path: "data/traffic.db"
+  pool_size: 5             # SQLite 连接池大小（>1 启用）
+  retention_days: 30
+  max_rows_per_table: 50000
+  max_size_mb: 512
+  cleanup_enabled: true
+  cleanup_interval_hours: 24
+
+# GUI 配置
+gui:
+  window_title: "实时交通分析系统"
+  window_size: [1400, 900]
+  theme: "dark"
+
+# 风险预测配置
+risk:
+  enabled: true
+  history_length: 10
+  prediction_horizon: 15
+  collision_threshold: 150.0
+  interaction_distance: 200
+  temporal_window: 10
+  interval: 3             # 每 N 帧计算一次风险（默认 3，降低卡顿）
+  max_tracks: 20          # 参与风险计算的最多车辆数（按框面积取前 N）
+  stgat_model_path: null      # 例如: experiments/stgat_xxx/best.pt
+  collision_model_path: null  # 例如: experiments/collision_predictor_xxx/best.pt
+  ttc_thresholds:
+    critical: 0.5
+    high: 1.0
+    medium: 2.0
+    low: 3.0

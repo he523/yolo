@@ -1,0 +1,51 @@
+{
+  "generated_at": "2026-02-28 15:35:48",
+  "repo": "https://github.com/Zhye26/yolo_ls.git",
+  "detection_training": {
+    "path": "/home/ubuntu/yolo_ls/runs/detect/experiments/yolo12n_20260126_144349/results.csv",
+    "epochs": 100,
+    "final": {
+      "precision": 0.91923,
+      "recall": 0.89029,
+      "map50": 0.93597,
+      "map50_95": 0.63949,
+      "train_box_loss": 0.82287,
+      "train_cls_loss": 0.41436
+    },
+    "best": {
+      "map50": 0.93712,
+      "map50_epoch": 88,
+      "map50_95": 0.63949,
+      "map50_95_epoch": 100
+    }
+  },
+  "ocr_eval": {
+    "model_path": "/home/ubuntu/yolo_ls/models/plate_ocr.pt",
+    "val_file": "/home/ubuntu/yolo_ls/datasets/cblprd/val.txt",
+    "sample_size": 150,
+    "valid_images": 150,
+    "invalid_images": 0,
+    "predicted_count": 133,
+    "exact_match_count": 119,
+    "exact_match_accuracy": 0.7933333333333333,
+    "prediction_coverage": 0.8866666666666667,
+    "avg_confidence": 0.9901888693185678,
+    "eval_seconds": 1.1282578930004092
+  },
+  "runtime_benchmark": {
+    "device": "cpu",
+    "model": "/home/ubuntu/yolo_ls/models/yolo12n_vehicle.pt",
+    "num_frames": 100,
+    "avg_latency_ms": 72.10420516988961,
+    "p95_latency_ms": 78.1303266501709,
+    "fps": 13.868816633424252,
+    "avg_detections_per_frame": 6.59
+  },
+  "pytest": {
+    "return_code": 0,
+    "duration_seconds": 58.68081057299787,
+    "raw_summary": "9 passed, 10 warnings in 53.00s",
+    "passed": 9,
+    "warnings": 10
+  }
+}
