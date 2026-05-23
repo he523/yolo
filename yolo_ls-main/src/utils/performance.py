@@ -50,6 +50,14 @@ class FPSMonitor:
         self._current_level = 0
         self._frame_count = 0
         self._low_fps_streak = 0
+        self._ready = False
+
+    def mark_ready(self) -> None:
+        """模型与 GPU 预热完成后调用，此前不参与降级判定。"""
+        self._ready = True
+        self._frame_count = 0
+        self.frame_times.clear()
+        self._low_fps_streak = 0
 
     def tick(self, elapsed_sec: float) -> None:
         self._frame_count += 1
@@ -64,6 +72,8 @@ class FPSMonitor:
         return 1.0 / avg_time if avg_time > 0 else 0.0
 
     def check_performance(self) -> Optional[DegradationPlan]:
+        if not self._ready:
+            return None
         if self._frame_count < self.warmup_frames:
             return None
         if len(self.frame_times) < 10:

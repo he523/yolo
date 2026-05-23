@@ -1,4 +1,5 @@
 """ByteTrack 多目标跟踪模块"""
+import threading
 import numpy as np
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ class Track:
 class KalmanBoxTracker:
     """使用卡尔曼滤波器的单目标跟踪器"""
     count = 0
+    _count_lock = threading.Lock()
 
     def __init__(self, bbox: Tuple[int, int, int, int]):
         # 状态向量: [x, y, s, r, vx, vy, vs]
@@ -61,8 +63,9 @@ class KalmanBoxTracker:
 
         self.kf.x[:4] = self._bbox_to_z(bbox)
         self.time_since_update = 0
-        self.id = KalmanBoxTracker.count
-        KalmanBoxTracker.count += 1
+        with KalmanBoxTracker._count_lock:
+            self.id = KalmanBoxTracker.count
+            KalmanBoxTracker.count += 1
         self.hits = 0
         self.age = 0
 
@@ -287,4 +290,5 @@ class ByteTracker:
         self.trackers = []
         self.track_info = {}
         self.frame_count = 0
-        KalmanBoxTracker.count = 0
+        with KalmanBoxTracker._count_lock:
+            KalmanBoxTracker.count = 0

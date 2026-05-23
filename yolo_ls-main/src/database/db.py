@@ -131,6 +131,12 @@ class Database:
                     break
             self._pool = None
 
+    def __enter__(self) -> "Database":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def _init_tables(self):
         """初始化数据表"""
         with self._get_connection() as conn:

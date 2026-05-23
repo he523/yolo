@@ -33,8 +33,10 @@ sys.path.insert(0, str(ROOT))
 def run_gui():
     """运行 GUI 模式"""
     from PyQt5.QtWidgets import QApplication
+    from src.utils.matplotlib_zh import configure_matplotlib_chinese
     from src.gui import MainWindow
 
+    configure_matplotlib_chinese()
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
@@ -264,17 +266,27 @@ def run_cli(args):
         video_fps = config.get('video', {}).get('fps', 15)
 
     base_risk_interval = int(risk_cfg.get('interval', 3))
+    enable_context_detection = bool(det_cfg.get('enable_context_detection', False))
+
+    if perf_enabled and fps_monitor:
+        if args.device == "cuda":
+            import numpy as _np
+            _warm = _np.zeros((360, 640, 3), dtype=_np.uint8)
+            detector.detect_vehicles(_warm)
+        fps_monitor.mark_ready()
 
     while True:
+        frame_count += 1
+
+        if perf_enabled and not perf.should_process_frame(frame_count):
+            if not video.grab():
+                break
+            continue
+
         frame_start = time.perf_counter()
         ret, frame = video.read()
         if not ret:
             break
-
-        frame_count += 1
-
-        if perf_enabled and not perf.should_process_frame(frame_count):
-            continue
 
         if perf_enabled:
             detector.imgsz = perf.get_imgsz()
@@ -289,9 +301,7 @@ def run_cli(args):
         risk_active = risk_enabled and not (perf_enabled and perf.risk_disabled())
 
         # 检测与跟踪（性能优化：尽量单次推理，避免每帧多次 predict）
-        det_cfg = config.get('detector', {})
-        enable_context = bool(det_cfg.get('enable_context_detection', False))
-        if enable_context:
+        if enable_context_detection:
             all_classes = list(detector.VEHICLE_CLASSES.keys()) + [
                 detector.PERSON_CLASS,
                 detector.TRAFFIC_LIGHT_CLASS,

@@ -98,6 +98,7 @@ gui:
   window_title: "实时交通分析系统"
   window_size: [1400, 900]
   theme: "dark"
+  language: zh_CN   # zh_CN | en
 
 # 风险预测配置
 risk:

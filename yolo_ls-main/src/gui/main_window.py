@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QTableWidget,
     QTableWidgetItem, QTabWidget, QGroupBox, QLineEdit,
     QComboBox, QSpinBox, QStatusBar, QSplitter, QMessageBox,
-    QCheckBox, QProgressBar, QFrame, QGridLayout
+    QCheckBox, QFrame
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QImage, QPixmap, QColor, QFont
@@ -27,7 +27,10 @@ import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+
+from src.utils.matplotlib_zh import configure_matplotlib_chinese, chart_font_props
+
+configure_matplotlib_chinese()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -43,13 +46,23 @@ from src.database.scheduler import start_db_cleanup_from_config
 from src.utils.config import load_config
 from src.utils.model_manager import ModelManager
 from src.utils.performance import PerformanceOptimizer, FPSMonitor
+from src.gui.i18n import Translator, SUPPORTED_LANGUAGES
+from src.gui.theme import (
+    COLORS,
+    MetricCard,
+    build_app_header,
+    global_stylesheet,
+    insight_panel_style,
+    message_box_stylesheet,
+)
 
 
 class StatisticsCanvas(FigureCanvas):
     """Matplotlib canvas for statistics charts"""
 
-    def __init__(self, parent=None):
-        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor='#1a1a2e')
+    def __init__(self, parent=None, translator: Optional[Translator] = None):
+        self._tr = translator
+        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor=COLORS['chart_bg'])
         super().__init__(self.fig)
         self.setParent(parent)
 
@@ -69,19 +82,29 @@ class StatisticsCanvas(FigureCanvas):
         self._setup_style()
         self.fig.tight_layout(pad=2.0)
 
+    def set_translator(self, translator: Translator) -> None:
+        self._tr = translator
+        self._setup_style()
+        self._redraw()
+
+    def _chart_title(self, key: str) -> str:
+        if self._tr:
+            return self._tr.tr(key)
+        return key
+
     def _setup_style(self):
         """Setup chart style"""
         for ax in [self.ax_flow, self.ax_violation, self.ax_speed, self.ax_type]:
-            ax.set_facecolor('#2d2d44')
-            ax.tick_params(colors='white', labelsize=8)
+            ax.set_facecolor(COLORS['surface'])
+            ax.tick_params(colors=COLORS['text_muted'], labelsize=8)
             for spine in ax.spines.values():
-                spine.set_color('#4a4a6a')
-            ax.title.set_color('white')
+                spine.set_color(COLORS['chart_grid'])
+            ax.title.set_color(COLORS['text'])
 
-        self.ax_flow.set_title('Traffic Flow', fontsize=10)
-        self.ax_violation.set_title('Violation Types', fontsize=10)
-        self.ax_speed.set_title('Speed Distribution', fontsize=10)
-        self.ax_type.set_title('Vehicle Types', fontsize=10)
+        self.ax_flow.set_title(self._chart_title('chart_flow'), fontsize=10, color=COLORS['text'])
+        self.ax_violation.set_title(self._chart_title('chart_violation'), fontsize=10, color=COLORS['text'])
+        self.ax_speed.set_title(self._chart_title('chart_speed'), fontsize=10, color=COLORS['text'])
+        self.ax_type.set_title(self._chart_title('chart_type'), fontsize=10, color=COLORS['text'])
 
     def update_data(self, vehicle_count: int, speeds: List[float],
                     violations: Dict[str, int], vehicle_types: Dict[str, int]):
@@ -105,57 +128,65 @@ class StatisticsCanvas(FigureCanvas):
         """Redraw all charts"""
         # Traffic flow
         self.ax_flow.clear()
-        self._setup_ax(self.ax_flow, 'Traffic Flow')
+        self._setup_ax(self.ax_flow, self._chart_title('chart_flow'))
         if self.vehicle_count_data:
             x = list(range(len(self.vehicle_count_data)))
-            self.ax_flow.plot(x, list(self.vehicle_count_data), color='#00ff88', linewidth=2)
-            self.ax_flow.fill_between(x, list(self.vehicle_count_data), alpha=0.3, color='#00ff88')
-            self.ax_flow.set_ylabel('Count', fontsize=8, color='white')
+            self.ax_flow.plot(x, list(self.vehicle_count_data), color=COLORS['text'], linewidth=2)
+            self.ax_flow.fill_between(x, list(self.vehicle_count_data), alpha=0.15, color=COLORS['text'])
+            self.ax_flow.set_ylabel(self._chart_title('chart_y_vehicles'), fontsize=8, color=COLORS['text_muted'])
 
         # Violation pie
         self.ax_violation.clear()
-        self._setup_ax(self.ax_violation, 'Violation Types')
+        self._setup_ax(self.ax_violation, self._chart_title('chart_violation'))
         if self.violation_counts:
             labels = list(self.violation_counts.keys())
             sizes = list(self.violation_counts.values())
-            colors = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff'][:len(labels)]
-            self.ax_violation.pie(sizes, labels=labels, colors=colors, autopct='%1.0f%%',
-                                  textprops={'color': 'white', 'fontsize': 7})
+            greys = ['#ffffff', '#d4d4d4', '#a3a3a3', '#737373'][:len(labels)]
+            self.ax_violation.pie(
+                sizes,
+                labels=labels,
+                colors=greys,
+                autopct='%1.0f%%',
+                textprops=chart_font_props(color='white', fontsize=7),
+            )
         else:
-            self.ax_violation.text(0.5, 0.5, 'No Data', ha='center', va='center', color='gray', fontsize=10)
+            nodata = self._chart_title('chart_no_data')
+            self.ax_violation.text(0.5, 0.5, nodata, ha='center', va='center', color=COLORS['text_muted'], fontsize=10)
 
         # Speed histogram
         self.ax_speed.clear()
-        self._setup_ax(self.ax_speed, 'Speed Distribution')
+        self._setup_ax(self.ax_speed, self._chart_title('chart_speed'))
         if self.speed_data:
-            self.ax_speed.hist(list(self.speed_data), bins=15, color='#4d96ff', alpha=0.7, edgecolor='white')
-            self.ax_speed.axvline(x=60, color='#ff6b6b', linestyle='--', linewidth=1.5)
-            self.ax_speed.set_xlabel('km/h', fontsize=8, color='white')
+            self.ax_speed.hist(list(self.speed_data), bins=15, color='#d4d4d4', alpha=0.85, edgecolor=COLORS['chart_grid'])
+            self.ax_speed.axvline(x=60, color=COLORS['text'], linestyle='--', linewidth=1.5)
+            self.ax_speed.set_xlabel('km/h', fontsize=8, color=COLORS['text_muted'])
         else:
-            self.ax_speed.text(0.5, 0.5, 'No Data', ha='center', va='center', color='gray', fontsize=10)
+            nodata = self._chart_title('chart_no_data')
+            self.ax_speed.text(0.5, 0.5, nodata, ha='center', va='center', color=COLORS['text_muted'], fontsize=10)
 
         # Vehicle type bar
         self.ax_type.clear()
-        self._setup_ax(self.ax_type, 'Vehicle Types')
+        self._setup_ax(self.ax_type, self._chart_title('chart_type'))
         if self.vehicle_type_counts:
             types = list(self.vehicle_type_counts.keys())
             counts = list(self.vehicle_type_counts.values())
-            colors = ['#6bcb77', '#4d96ff', '#ffd93d', '#ff6b6b'][:len(types)]
-            self.ax_type.bar(types, counts, color=colors)
+            greys = ['#ffffff', '#d4d4d4', '#a3a3a3', '#737373'][:len(types)]
+            self.ax_type.bar(types, counts, color=greys)
             self.ax_type.tick_params(axis='x', labelrotation=15)
         else:
-            self.ax_type.text(0.5, 0.5, 'No Data', ha='center', va='center', color='gray', fontsize=10)
+            nodata = self._chart_title('chart_no_data')
+            self.ax_type.text(0.5, 0.5, nodata, ha='center', va='center', color=COLORS['text_muted'], fontsize=10)
 
         self.fig.tight_layout(pad=2.0)
         self.draw()
 
     def _setup_ax(self, ax, title: str):
         """Setup axis style"""
-        ax.set_facecolor('#2d2d44')
-        ax.tick_params(colors='white', labelsize=7)
+        ax.set_facecolor(COLORS['surface'])
+        ax.tick_params(colors=COLORS['text_muted'], labelsize=7)
         for spine in ax.spines.values():
-            spine.set_color('#4a4a6a')
-        ax.set_title(title, fontsize=10, color='white')
+            spine.set_color(COLORS['chart_grid'])
+        ax.set_title(title, fontsize=10, color=COLORS['text'])
 
     def reset(self):
         """Reset all data"""
@@ -196,7 +227,9 @@ class VideoThread(QThread):
                 fps=self.config.get('fps', 15)
             )
             if not self.video_stream.open():
-                self.error.emit("Cannot open video source")
+                lang = self.config.get("gui_language", "zh_CN")
+                tr = Translator(lang)
+                self.error.emit(tr.tr("error_open_source"))
                 return
 
             model_mgr = ModelManager({'detector': {'model_path': self.config.get('model_path')},
@@ -280,15 +313,12 @@ class VideoThread(QThread):
                     device=self.config.get('device', 'cpu'),
                 )
 
-            # Initialize Plate Reader（可配置关闭以减轻 Paddle 加载）
-            if self.config.get('ocr_enabled', True) and int(self.config.get('ocr_interval', 0)) > 0:
-                self.plate_reader = PlateReader(
-                    model_path=self.config.get('plate_model_path', 'models/plate_ocr.pt'),
-                    use_gpu=self.config.get('device', 'cpu') != 'cpu',
-                    paddle_mobile=self.config.get('ocr_paddle_mobile', True),
-                )
-            else:
-                self.plate_reader = None
+            # 车牌 OCR 延迟到首次需要时再加载，避免阻塞视频线程启动
+            self.plate_reader = None
+            self._ocr_enabled = bool(
+                self.config.get('ocr_enabled', True)
+                and int(self.config.get('ocr_interval', 0)) > 0
+            )
 
             if self.config.get('stop_line'):
                 sl = self.config['stop_line']
@@ -305,15 +335,29 @@ class VideoThread(QThread):
             base_ocr_interval = int(self.config.get('ocr_interval', 10))
             ocr_min_h = int(self.config.get('ocr_min_bbox_height', 40))
 
-            for frame in self.video_stream.frames():
-                if not self.running:
+            # GPU / 推理预热，避免冷启动 FPS 误触发降级
+            if self.detector.device == "cuda":
+                import numpy as _np
+                _warm = _np.zeros((360, 640, 3), dtype=_np.uint8)
+                self.detector.detect_vehicles(_warm)
+
+            if perf_enabled and fps_monitor:
+                fps_monitor.mark_ready()
+
+            while self.running:
+                if self.video_stream is None or self.video_stream.cap is None:
                     break
 
-                frame_start = time.perf_counter()
                 frame_count += 1
-
                 if perf_enabled and not perf.should_process_frame(frame_count):
+                    if not self.video_stream.grab():
+                        break
                     continue
+
+                frame_start = time.perf_counter()
+                ret, frame = self.video_stream.read()
+                if not ret or frame is None:
+                    break
 
                 if perf_enabled:
                     self.detector.imgsz = perf.get_imgsz()
@@ -389,7 +433,7 @@ class VideoThread(QThread):
                 plate_results = {}  # track_id -> plate_number
 
                 ocr_targets = []
-                if self.plate_reader and effective_ocr_interval > 0 and frame_count % effective_ocr_interval == 0:
+                if self._ocr_enabled and effective_ocr_interval > 0 and frame_count % effective_ocr_interval == 0:
                     bbox_heights = {t.track_id: t.bbox[3] - t.bbox[1] for t in tracks}
                     ocr_targets = ocr_scheduler.select_tracks(
                         [t.track_id for t in tracks],
@@ -400,19 +444,27 @@ class VideoThread(QThread):
 
                 for track in tracks:
                     plate_number = plate_cache.get(track.track_id)
-                    if self.plate_reader and track.track_id in ocr_targets:
-                        plate_result = self.plate_reader.read(frame, track.bbox)
-                        if plate_result:
-                            plate_number = plate_result.plate_number
-                            plate_cache[track.track_id] = plate_number
-                            plate_results[track.track_id] = plate_number
-                        elif track.track_id not in plate_cache:
-                            plate_cache[track.track_id] = "识别中"
-                            plate_results[track.track_id] = "识别中"
+                    if self._ocr_enabled and track.track_id in ocr_targets:
+                        if self.plate_reader is None:
+                            self.plate_reader = PlateReader(
+                                model_path=self.config.get('plate_model_path', 'models/plate_ocr.pt'),
+                                use_gpu=self.config.get('device', 'cpu') != 'cpu',
+                                paddle_mobile=self.config.get('ocr_paddle_mobile', True),
+                            )
+                        if self.plate_reader:
+                            plate_result = self.plate_reader.read(frame, track.bbox)
+                            if plate_result:
+                                plate_number = plate_result.plate_number
+                                plate_cache[track.track_id] = plate_number
+                                plate_results[track.track_id] = plate_number
+                            elif track.track_id not in plate_cache:
+                                pending = self.config.get("plate_pending_label", "识别中")
+                                plate_cache[track.track_id] = pending
+                                plate_results[track.track_id] = pending
                     elif (
                         self.plate_reader
                         and plate_number
-                        and plate_number != "识别中"
+                        and plate_number != self.config.get("plate_pending_label", "识别中")
                     ):
                         plate_results[track.track_id] = plate_number
 
@@ -481,7 +533,7 @@ class VideoThread(QThread):
             logging.getLogger(__name__).exception("Video thread error")
             self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
         finally:
-            if self.video_stream:
+            if self.video_stream is not None:
                 self.video_stream.release()
 
     def stop(self):
@@ -495,10 +547,11 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Real-Time Traffic Analysis - Adaptive Violation Detection")
-        self.setGeometry(100, 100, 1500, 950)
+        self._tr = Translator("zh_CN")
+        self._last_stats: Dict = {}
+        self._last_collision_risks: list = []
+        self.setGeometry(100, 100, 1560, 960)
 
-        # 全局外观：深色主题 + 统一字体
         self._apply_global_style()
 
         self.video_thread: Optional[VideoThread] = None
@@ -542,8 +595,8 @@ class MainWindow(QMainWindow):
             'ocr_paddle_mobile': True,
             'ocr_interval': 10,
             'ocr_min_bbox_height': 40,
-            'ocr_max_vehicles_per_frame': 10,
-            'performance_warmup_frames': 45,
+            'ocr_max_vehicles_per_frame': 5,
+            'performance_warmup_frames': 60,
             'performance_low_fps_checks': 5,
             # 小目标/远处车辆检测增强
             'imgsz': 768,
@@ -566,9 +619,14 @@ class MainWindow(QMainWindow):
             'performance_frame_skip': 1,
             'database_path': 'data/traffic.db',
             'database_pool_size': 5,
+            'gui_language': 'zh_CN',
         }
 
         self._merge_config_from_yaml()
+        lang = self.config.get('gui_language', 'zh_CN')
+        if lang not in SUPPORTED_LANGUAGES:
+            lang = 'zh_CN'
+        self._tr.set_language(lang)
         self.database = Database(
             db_path=self.config.get('database_path', 'data/traffic.db'),
             pool_size=int(self.config.get('database_pool_size', 5)),
@@ -578,10 +636,8 @@ class MainWindow(QMainWindow):
             load_config('config/settings.yaml') or {'database': {}},
         )
         self._init_ui()
+        self._retranslate_ui()
         gui_cfg = (load_config('config/settings.yaml') or {}).get('gui', {})
-        title = gui_cfg.get('window_title')
-        if title:
-            self.setWindowTitle(title)
         size = gui_cfg.get('window_size')
         if isinstance(size, (list, tuple)) and len(size) == 2:
             self.setGeometry(100, 100, int(size[0]), int(size[1]))
@@ -602,6 +658,7 @@ class MainWindow(QMainWindow):
         db = cfg.get('database', {})
         tracker = cfg.get('tracker', {})
         feature = cfg.get('feature', {})
+        gui = cfg.get('gui', {})
         self.config.update({
             'fps': video.get('fps', self.config['fps']),
             'model_path': det.get('model_path', self.config['model_path']),
@@ -670,6 +727,7 @@ class MainWindow(QMainWindow):
             'performance_frame_skip': perf.get('frame_skip', self.config.get('performance_frame_skip', 1)),
             'database_path': db.get('path', self.config.get('database_path', 'data/traffic.db')),
             'database_pool_size': db.get('pool_size', self.config.get('database_pool_size', 5)),
+            'gui_language': gui.get('language', self.config.get('gui_language', 'zh_CN')),
         })
 
     def _apply_config_to_controls(self):
@@ -692,203 +750,140 @@ class MainWindow(QMainWindow):
             self.spin_sl_x2.setValue(int(sl.get('x_end', 1100)))
 
     def _apply_global_style(self):
-        """应用全局深色主题和基础样式（不影响业务逻辑）"""
+        """应用全局深色主题（见 src/gui/theme.py）。"""
         palette = self.palette()
-        # 更柔和、略微明亮的深色方案
-        palette.setColor(palette.Window, QColor("#0f172a"))          # 全局背景
-        palette.setColor(palette.Base, QColor("#020617"))            # 输入/表格底色
-        palette.setColor(palette.AlternateBase, QColor("#020617"))
-        palette.setColor(palette.Text, QColor("#e5e7eb"))
-        palette.setColor(palette.WindowText, QColor("#e5e7eb"))
-        palette.setColor(palette.Button, QColor("#0b1120"))
-        palette.setColor(palette.ButtonText, QColor("#e5e7eb"))
-        palette.setColor(palette.Highlight, QColor("#38bdf8"))  # 清爽蓝
-        palette.setColor(palette.HighlightedText, QColor("#0f172a"))
+        palette.setColor(palette.Window, QColor(COLORS["bg"]))
+        palette.setColor(palette.Base, QColor(COLORS["bg_elevated"]))
+        palette.setColor(palette.AlternateBase, QColor(COLORS["surface"]))
+        palette.setColor(palette.Text, QColor(COLORS["text"]))
+        palette.setColor(palette.WindowText, QColor(COLORS["text"]))
+        palette.setColor(palette.Button, QColor(COLORS["surface"]))
+        palette.setColor(palette.ButtonText, QColor(COLORS["text"]))
+        palette.setColor(palette.Highlight, QColor(COLORS["accent"]))
+        palette.setColor(palette.HighlightedText, QColor(COLORS["bg"]))
         self.setPalette(palette)
+        self.setStyleSheet(global_stylesheet())
 
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #0f172a;
-            }
+    def _set_live_badge(self, running: bool) -> None:
+        if not getattr(self, "live_badge", None):
+            return
+        if running:
+            self.live_badge.setText(self._tr.tr("live_running"))
+            self.live_badge.setStyleSheet(
+                f"background-color: {COLORS['text']};"
+                f"color: {COLORS['bg']};"
+                f"border: 1px solid {COLORS['text']};"
+                f"border-radius: 4px; padding: 4px 10px;"
+                f"font-size: 11px; font-weight: 700;"
+            )
+        else:
+            self.live_badge.setText(self._tr.tr("live_idle"))
+            self.live_badge.setObjectName("LiveBadge")
+            self.live_badge.setStyleSheet("")
 
-            QWidget {
-                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-                font-size: 12px;
-            }
+    def _on_language_changed(self, index: int) -> None:
+        lang = "zh_CN" if index == 0 else "en"
+        self._tr.set_language(lang)
+        self.config["gui_language"] = lang
+        self._retranslate_ui()
+        self._set_live_badge(self._is_processing)
+        if self._last_stats:
+            self._on_stats_updated(self._last_stats)
 
-            QLabel {
-                color: #e5e7eb;
-            }
-
-            QGroupBox {
-                color: #e5e7eb;
-                border: 1px solid rgba(148, 163, 184, 0.18);
-                border-radius: 12px;
-                margin-top: 10px;
-                padding: 10px 12px 14px 12px;
-                font-weight: 600;
-                background-color: rgba(15, 23, 42, 0.55);
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0 6px;
-                color: #94a3b8;
-            }
-
-            QTabWidget::pane {
-                border: 1px solid rgba(148, 163, 184, 0.18);
-                border-radius: 10px;
-                background-color: #020617;
-            }
-            QTabWidget {
-                background: transparent;
-            }
-            QTabBar::tab {
-                background: #0b1220;
-                color: #94a3b8;
-                padding: 7px 14px;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #0f172a;
-                color: #e5e7eb;
-            }
-            QTabBar::tab:hover {
-                background: rgba(148, 163, 184, 0.10);
-            }
-
-            QSplitter::handle {
-                background: rgba(148, 163, 184, 0.08);
-            }
-            QSplitter::handle:hover {
-                background: rgba(96, 165, 250, 0.18);
-            }
-
-            QTableWidget {
-                background-color: #020617;
-                alternate-background-color: rgba(148, 163, 184, 0.07);
-                gridline-color: rgba(148, 163, 184, 0.12);
-                color: #e5e7eb;
-                selection-background-color: rgba(96, 165, 250, 0.35);
-                selection-color: #f9fafb;
-                border-radius: 8px;
-            }
-            QTableCornerButton::section {
-                background-color: #0b1220;
-                border: none;
-            }
-            QHeaderView::section {
-                background-color: #020617;
-                color: #94a3b8;
-                padding: 6px 6px;
-                border: none;
-                border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-            }
-
-            QLineEdit {
-                background-color: #020617;
-                border-radius: 8px;
-                border: 1px solid rgba(148, 163, 184, 0.16);
-                padding: 6px 10px;
-                color: #e5e7eb;
-            }
-            QLineEdit:focus {
-                border-color: rgba(96, 165, 250, 0.70);
-            }
-
-            QCheckBox {
-                color: #e5e7eb;
-            }
-
-            QPushButton {
-                background-color: rgba(148, 163, 184, 0.10);
-                color: #e5e7eb;
-                border: 1px solid rgba(148, 163, 184, 0.10);
-                border-radius: 16px;
-                padding: 8px 16px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: rgba(148, 163, 184, 0.14);
-                border-color: rgba(148, 163, 184, 0.16);
-            }
-            QPushButton:pressed {
-                background-color: rgba(96, 165, 250, 0.18);
-                border-color: rgba(96, 165, 250, 0.22);
-            }
-            QPushButton:disabled {
-                background-color: rgba(148, 163, 184, 0.06);
-                color: rgba(148, 163, 184, 0.45);
-                border-color: rgba(148, 163, 184, 0.06);
-            }
-
-            QSpinBox {
-                background-color: #020617;
-                border-radius: 8px;
-                border: 1px solid rgba(148, 163, 184, 0.16);
-                padding: 4px 10px;
-                color: #e5e7eb;
-            }
-            QSpinBox:focus {
-                border-color: rgba(96, 165, 250, 0.70);
-            }
-
-            QScrollBar:vertical {
-                background: transparent;
-                width: 10px;
-                margin: 6px 2px 6px 2px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(148, 163, 184, 0.20);
-                border-radius: 5px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(148, 163, 184, 0.30);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-
-            QScrollBar:horizontal {
-                background: transparent;
-                height: 10px;
-                margin: 2px 6px 2px 6px;
-            }
-            QScrollBar::handle:horizontal {
-                background: rgba(148, 163, 184, 0.20);
-                border-radius: 5px;
-                min-width: 30px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: rgba(148, 163, 184, 0.30);
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: transparent;
-            }
-
-            QStatusBar {
-                background-color: #020617;
-                color: #94a3b8;
-            }
-        """)
+    def _retranslate_ui(self) -> None:
+        tr = self._tr
+        self.setWindowTitle(tr.tr("app_title"))
+        self.header_title.setText(tr.tr("app_title"))
+        self.header_subtitle.setText(tr.tr("app_subtitle"))
+        self.lang_label.setText(tr.tr("language"))
+        self.combo_language.blockSignals(True)
+        self.combo_language.setItemText(0, tr.tr("lang_zh"))
+        self.combo_language.setItemText(1, tr.tr("lang_en"))
+        self.combo_language.blockSignals(False)
+        self.video_label.setText(tr.tr("video_placeholder"))
+        self.btn_open.setText(tr.tr("btn_open_video"))
+        self.btn_camera.setText(tr.tr("btn_open_camera"))
+        self.btn_stop.setText(tr.tr("btn_stop"))
+        self.stats_group.setTitle(tr.tr("group_realtime"))
+        self.card_vehicles.set_title(tr.tr("card_vehicles"))
+        self.card_speed.set_title(tr.tr("card_speed"))
+        self.card_emergency.set_title(tr.tr("card_emergency"))
+        self.card_fps.set_title(tr.tr("card_fps"))
+        self.vf_title.setText(tr.tr("violations_title"))
+        self.rf_title.setText(tr.tr("risk_title"))
+        self.vehicle_group.setTitle(tr.tr("group_vehicles"))
+        self.vehicle_table.setHorizontalHeaderLabels([
+            tr.tr("veh_header_id"), tr.tr("veh_header_type"), tr.tr("veh_header_color"),
+            tr.tr("veh_header_speed"), tr.tr("veh_header_dir"), tr.tr("veh_header_plate"),
+        ])
+        self.cb_show_exempted.setText(tr.tr("show_exempted"))
+        self.cb_only_exempted.setText(tr.tr("only_exempted"))
+        self.violation_table.setHorizontalHeaderLabels([
+            tr.tr("vio_header_time"), tr.tr("vio_header_type"), tr.tr("vio_header_plate"),
+            tr.tr("vio_header_speed"), tr.tr("vio_header_status"),
+            tr.tr("vio_header_reason"), tr.tr("vio_header_details"),
+        ])
+        self.search_input.setPlaceholderText(tr.tr("search_plate_ph"))
+        self.btn_search.setText(tr.tr("btn_search"))
+        self.db_table_label.setText(tr.tr("db_table_label"))
+        self.db_search_input.setPlaceholderText(tr.tr("db_search_ph"))
+        self.db_refresh_btn.setText(tr.tr("db_refresh"))
+        self.db_delete_btn.setText(tr.tr("db_delete"))
+        self.db_clean_label.setText(tr.tr("db_clean_label"))
+        self.db_clean_btn.setText(tr.tr("db_clean_btn"))
+        self.exemption_info.setText(tr.tr("exemption_html"))
+        self.btn_reset_stats.setText(tr.tr("btn_reset_stats"))
+        self.detect_group.setTitle(tr.tr("group_detection"))
+        self.lbl_confidence.setText(tr.tr("label_confidence"))
+        self.lbl_speed_limit.setText(tr.tr("label_speed_limit"))
+        self.lbl_emergency_dist.setText(tr.tr("label_emergency_dist"))
+        self.lbl_flow_dir.setText(tr.tr("label_flow_dir"))
+        self.cb_enable_tiling.setText(tr.tr("cb_tiling"))
+        self.cb_wrong_way.setText(tr.tr("cb_wrong_way"))
+        self.cb_illegal_lane.setText(tr.tr("cb_illegal_lane"))
+        self.cb_performance.setText(tr.tr("cb_performance"))
+        self.btn_reload_cfg.setText(tr.tr("btn_reload_cfg"))
+        self.stopline_group.setTitle(tr.tr("group_stopline"))
+        self.cb_enable_stopline.setText(tr.tr("cb_stopline"))
+        self.lbl_sl_y.setText(tr.tr("label_sl_y"))
+        self.lbl_sl_x.setText(tr.tr("label_sl_x"))
+        self.btn_auto_stopline.setText(tr.tr("btn_auto_stopline"))
+        self.right_panel.setTabText(0, tr.tr("tab_realtime"))
+        self.right_panel.setTabText(1, tr.tr("tab_violations"))
+        self.right_panel.setTabText(2, tr.tr("tab_database"))
+        self.right_panel.setTabText(3, tr.tr("tab_exemption"))
+        self.right_panel.setTabText(4, tr.tr("tab_statistics"))
+        self.right_panel.setTabText(5, tr.tr("tab_settings"))
+        if self.stats_canvas:
+            self.stats_canvas.set_translator(tr)
+        if not self._is_processing:
+            self.statusBar.showMessage(tr.tr("status_ready"))
+        self._refresh_violation_labels()
+        self._refresh_risk_labels()
 
     def _init_ui(self):
         """Initialize UI"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(14, 14, 14, 14)
-        main_layout.setSpacing(12)
+        root_layout = QVBoxLayout(central_widget)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+        root_layout.setSpacing(14)
+
+        app_header, self.header_title, self.header_subtitle, self.live_badge, header_right = build_app_header(self._tr)
+        self.lang_label = QLabel()
+        self.lang_label.setObjectName("LangLabel")
+        self.combo_language = QComboBox()
+        self.combo_language.addItem(self._tr.tr("lang_zh"), "zh_CN")
+        self.combo_language.addItem(self._tr.tr("lang_en"), "en")
+        lang_idx = 0 if self._tr.language == "zh_CN" else 1
+        self.combo_language.setCurrentIndex(lang_idx)
+        self.combo_language.currentIndexChanged.connect(self._on_language_changed)
+        header_right.insertWidget(0, self.combo_language)
+        header_right.insertWidget(0, self.lang_label)
+        root_layout.addWidget(app_header)
+
+        body_layout = QHBoxLayout()
+        body_layout.setSpacing(14)
 
         # Left panel: Video display
         left_panel = QWidget()
@@ -896,120 +891,104 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
 
+        video_frame = QFrame()
+        video_frame.setObjectName("VideoPanel")
+        video_frame_layout = QVBoxLayout(video_frame)
+        video_frame_layout.setContentsMargins(4, 4, 4, 4)
+
         self.video_label = QLabel()
-        self.video_label.setMinimumSize(900, 650)
-        self.video_label.setStyleSheet("""
-            background-color: qlineargradient(
-                x1:0, y1:0, x2:1, y2:1,
-                stop:0 #0b1220,
-                stop:1 #0f172a
-            );
-            border-radius: 14px;
-            border: 1px solid rgba(148, 163, 184, 0.14);
-        """)
+        self.video_label.setObjectName("VideoPlaceholder")
+        self.video_label.setMinimumSize(920, 620)
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setText("拖拽视频到此处，或点击下方“打开视频”")
-        self.video_label.setStyleSheet(self.video_label.styleSheet() + "color: #94a3b8; font-size: 13px;")
-        left_layout.addWidget(self.video_label)
+        video_frame_layout.addWidget(self.video_label)
+        left_layout.addWidget(video_frame, stretch=1)
 
-        # Control buttons
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-        self.btn_open = QPushButton("Open Video")
-        self.btn_camera = QPushButton("Open Camera")
-        self.btn_stop = QPushButton("Stop")
+        btn_layout.setSpacing(12)
+        self.btn_open = QPushButton()
+        self.btn_camera = QPushButton()
+        self.btn_stop = QPushButton()
         self.btn_stop.setEnabled(False)
-
-        # 单独给底部按钮一个更清晰的层级
-        for btn in [self.btn_open, self.btn_camera]:
-            btn.setMinimumHeight(38)
-            btn.setStyleSheet(btn.styleSheet() + "QPushButton{background-color: rgba(96, 165, 250, 0.16);} QPushButton:hover{background-color: rgba(96, 165, 250, 0.22);}")
-        self.btn_stop.setMinimumHeight(38)
-        self.btn_stop.setStyleSheet(self.btn_stop.styleSheet() + "QPushButton{background-color: rgba(252, 165, 165, 0.14);} QPushButton:hover{background-color: rgba(252, 165, 165, 0.20);}")
+        for btn in (self.btn_open, self.btn_camera):
+            btn.setProperty("btnRole", "primary")
+            btn.setMinimumHeight(42)
+        self.btn_stop.setProperty("btnRole", "danger")
+        self.btn_stop.setMinimumHeight(42)
+        for btn in (self.btn_open, self.btn_camera, self.btn_stop):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
         self.btn_open.clicked.connect(self._open_video)
         self.btn_camera.clicked.connect(self._open_camera)
         self.btn_stop.clicked.connect(self._stop_video)
 
-        btn_layout.addWidget(self.btn_open)
-        btn_layout.addWidget(self.btn_camera)
-        btn_layout.addWidget(self.btn_stop)
+        btn_layout.addWidget(self.btn_open, stretch=1)
+        btn_layout.addWidget(self.btn_camera, stretch=1)
+        btn_layout.addWidget(self.btn_stop, stretch=1)
         left_layout.addLayout(btn_layout)
 
-        # Right panel: Info tabs
-        right_panel = QTabWidget()
-        right_panel.setMaximumWidth(550)
+        self.right_panel = QTabWidget()
+        right_panel = self.right_panel
+        right_panel.setMinimumWidth(420)
+        right_panel.setMaximumWidth(560)
         right_panel.setDocumentMode(True)
         right_panel.setUsesScrollButtons(True)
 
-        # ===== Real-time Info Tab =====
         info_tab = QWidget()
         info_layout = QVBoxLayout(info_tab)
+        info_layout.setSpacing(12)
 
-        stats_group = QGroupBox("Real-time Statistics")
+        self.stats_group = QGroupBox()
+        stats_group = self.stats_group
         stats_layout = QVBoxLayout(stats_group)
-        stats_layout.setSpacing(6)
+        stats_layout.setSpacing(10)
 
-        # 使用两列栅格让右上角信息更整齐
-        stats_header_grid = QGridLayout()
-        stats_header_grid.setColumnStretch(0, 1)
-        stats_header_grid.setColumnStretch(1, 1)
+        metrics_row1 = QHBoxLayout()
+        self.card_vehicles = MetricCard("", "0")
+        self.card_speed = MetricCard("", "0 km/h")
+        metrics_row1.addWidget(self.card_vehicles)
+        metrics_row1.addWidget(self.card_speed)
 
-        self.label_vehicle_count = QLabel("Vehicles")
-        self.label_emergency_count = QLabel("Emergency Vehicles")
-        self.label_avg_speed = QLabel("Avg Speed")
-        for lbl in (self.label_vehicle_count, self.label_emergency_count, self.label_avg_speed):
-            lbl.setStyleSheet("color: #9ca3af;")
+        metrics_row2 = QHBoxLayout()
+        self.card_emergency = MetricCard("", "0")
+        self.card_fps = MetricCard("", "--")
+        metrics_row2.addWidget(self.card_emergency)
+        metrics_row2.addWidget(self.card_fps)
+        stats_layout.addLayout(metrics_row1)
+        stats_layout.addLayout(metrics_row2)
 
-        self.label_vehicle_count_value = QLabel("0")
-        self.label_emergency_count_value = QLabel("0")
-        self.label_avg_speed_value = QLabel("0 km/h")
-        for v in (self.label_vehicle_count_value, self.label_emergency_count_value, self.label_avg_speed_value):
-            v.setAlignment(Qt.AlignRight)
-
-        stats_header_grid.addWidget(self.label_vehicle_count, 0, 0)
-        stats_header_grid.addWidget(self.label_vehicle_count_value, 0, 1)
-        stats_header_grid.addWidget(self.label_emergency_count, 1, 0)
-        stats_header_grid.addWidget(self.label_emergency_count_value, 1, 1)
-        stats_header_grid.addWidget(self.label_avg_speed, 2, 0)
-        stats_header_grid.addWidget(self.label_avg_speed_value, 2, 1)
-
-        self.label_perf_fps = QLabel("Runtime FPS")
-        self.label_perf_fps.setStyleSheet("color: #9ca3af;")
-        self.label_perf_fps_value = QLabel("--")
-        self.label_perf_fps_value.setAlignment(Qt.AlignRight)
-        self.label_perf_degrade = QLabel("Perf / Degrade")
-        self.label_perf_degrade.setStyleSheet("color: #9ca3af;")
-        self.label_perf_degrade_value = QLabel("imgsz -- L0")
-        self.label_perf_degrade_value.setAlignment(Qt.AlignRight)
-        stats_header_grid.addWidget(self.label_perf_fps, 3, 0)
-        stats_header_grid.addWidget(self.label_perf_fps_value, 3, 1)
-        stats_header_grid.addWidget(self.label_perf_degrade, 4, 0)
-        stats_header_grid.addWidget(self.label_perf_degrade_value, 4, 1)
+        self.label_perf_degrade_value = QLabel("推理 · imgsz -- · 降级 L0 · 跳帧 ×1")
+        self.label_perf_degrade_value.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; padding: 0 4px;")
+        stats_layout.addWidget(self.label_perf_degrade_value)
 
         violation_frame = QFrame()
-        violation_frame.setStyleSheet("background-color: rgba(15, 23, 42, 0.35); border-radius: 10px; padding: 10px; border: 1px solid rgba(148, 163, 184, 0.12);")
+        violation_frame.setStyleSheet(insight_panel_style())
         vf_layout = QVBoxLayout(violation_frame)
-        self.label_total_violations = QLabel("Total Violations: 0")
-        self.label_actual_violations = QLabel("Actual Violations: 0")
-        self.label_actual_violations.setStyleSheet("color: #fca5a5; font-weight: 700;")
-        self.label_exempted = QLabel("Exempted (Special Cases): 0")
-        self.label_exempted.setStyleSheet("color: #fde68a; font-weight: 700;")
+        self.vf_title = QLabel()
+        vf_title = self.vf_title
+        vf_title.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600; font-size: 11px;")
+        self.label_total_violations = QLabel("累计违规：0")
+        self.label_actual_violations = QLabel("实际违规：0")
+        self.label_actual_violations.setStyleSheet(f"color: {COLORS['text']}; font-weight: 700;")
+        self.label_exempted = QLabel()
+        self.label_exempted.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 700;")
+        vf_layout.addWidget(vf_title)
         vf_layout.addWidget(self.label_total_violations)
         vf_layout.addWidget(self.label_actual_violations)
         vf_layout.addWidget(self.label_exempted)
-
-        stats_layout.addLayout(stats_header_grid)
         stats_layout.addWidget(violation_frame)
 
-        # Collision Risk Display
         risk_frame = QFrame()
-        risk_frame.setStyleSheet("background-color: rgba(15, 23, 42, 0.35); border-radius: 10px; padding: 10px; border: 1px solid rgba(148, 163, 184, 0.12);")
+        risk_frame.setStyleSheet(insight_panel_style())
         rf_layout = QVBoxLayout(risk_frame)
-        self.label_collision_risk = QLabel("Collision Risk: SAFE")
-        self.label_collision_risk.setStyleSheet("color: #86efac; font-weight: 700;")
-        self.label_min_ttc = QLabel("Min TTC: --")
-        self.label_risk_count = QLabel("Active Risks: 0")
+        self.rf_title = QLabel()
+        self.rf_title.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600; font-size: 11px;")
+        rf_title = self.rf_title
+        self.label_collision_risk = QLabel()
+        self.label_collision_risk.setStyleSheet(f"color: {COLORS['text']}; font-weight: 700; font-size: 14px;")
+        self.label_min_ttc = QLabel("最短 TTC：--")
+        self.label_risk_count = QLabel("活跃风险对：0")
+        rf_layout.addWidget(rf_title)
         rf_layout.addWidget(self.label_collision_risk)
         rf_layout.addWidget(self.label_min_ttc)
         rf_layout.addWidget(self.label_risk_count)
@@ -1017,14 +996,11 @@ class MainWindow(QMainWindow):
 
         info_layout.addWidget(stats_group)
 
-        # Vehicle list
-        vehicle_group = QGroupBox("Detected Vehicles")
+        self.vehicle_group = QGroupBox()
+        vehicle_group = self.vehicle_group
         vehicle_layout = QVBoxLayout(vehicle_group)
         self.vehicle_table = QTableWidget()
         self.vehicle_table.setColumnCount(6)
-        self.vehicle_table.setHorizontalHeaderLabels(
-            ["ID", "Type", "Color", "Speed(km/h)", "Direction", "Plate"]
-        )
         self.vehicle_table.horizontalHeader().setStretchLastSection(True)
         self.vehicle_table.verticalHeader().setVisible(False)
         self.vehicle_table.setShowGrid(False)
@@ -1034,16 +1010,15 @@ class MainWindow(QMainWindow):
         vehicle_layout.addWidget(self.vehicle_table)
         info_layout.addWidget(vehicle_group)
 
-        right_panel.addTab(info_tab, "Real-time Info")
+        right_panel.addTab(info_tab, "")
 
-        # ===== Violation Records Tab =====
         violation_tab = QWidget()
         violation_layout = QVBoxLayout(violation_tab)
 
         filter_layout = QHBoxLayout()
-        self.cb_show_exempted = QCheckBox("Show Exempted")
+        self.cb_show_exempted = QCheckBox()
         self.cb_show_exempted.setChecked(True)
-        self.cb_only_exempted = QCheckBox("Only Exempted")
+        self.cb_only_exempted = QCheckBox()
         filter_layout.addWidget(self.cb_show_exempted)
         filter_layout.addWidget(self.cb_only_exempted)
         filter_layout.addStretch()
@@ -1051,9 +1026,6 @@ class MainWindow(QMainWindow):
 
         self.violation_table = QTableWidget()
         self.violation_table.setColumnCount(7)
-        self.violation_table.setHorizontalHeaderLabels(
-            ["Time", "Type", "Plate", "Speed", "Status", "Reason", "Details"]
-        )
         self.violation_table.horizontalHeader().setStretchLastSection(True)
         self.violation_table.setAlternatingRowColors(True)
         self.violation_table.verticalHeader().setVisible(False)
@@ -1064,17 +1036,19 @@ class MainWindow(QMainWindow):
 
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter plate number...")
-        btn_search = QPushButton("Search")
-        btn_search.clicked.connect(self._search_plate)
+        self.btn_search = QPushButton()
+        self.btn_search.setProperty("btnRole", "primary")
+        self.btn_search.style().unpolish(self.btn_search)
+        self.btn_search.style().polish(self.btn_search)
+        self.btn_search.clicked.connect(self._search_plate)
         search_layout.addWidget(self.search_input)
-        search_layout.addWidget(btn_search)
+        search_layout.addWidget(self.btn_search)
         violation_layout.addLayout(search_layout)
         # 交互优化：切换过滤立即刷新
         self.cb_show_exempted.stateChanged.connect(self._refresh_violation_table)
         self.cb_only_exempted.stateChanged.connect(self._refresh_violation_table)
 
-        right_panel.addTab(violation_tab, "Violations")
+        right_panel.addTab(violation_tab, "")
 
         # ===== Vehicles DB Tab =====
         vehicles_tab = QWidget()
@@ -1084,10 +1058,11 @@ class MainWindow(QMainWindow):
         self.db_table_combo = QComboBox()
         self.db_table_combo.addItems(["traffic_flow", "vehicles", "violations"])
         self.db_search_input = QLineEdit()
-        self.db_search_input.setPlaceholderText("按车牌筛选（仅 vehicles/violations 生效）")
-        self.db_refresh_btn = QPushButton("刷新")
-        self.db_delete_btn = QPushButton("删除选中车辆")
-        toolbar_layout.addWidget(QLabel("Table:"))
+        self.db_search_input = QLineEdit()
+        self.db_refresh_btn = QPushButton()
+        self.db_delete_btn = QPushButton()
+        self.db_table_label = QLabel()
+        toolbar_layout.addWidget(self.db_table_label)
         toolbar_layout.addWidget(self.db_table_combo)
         toolbar_layout.addWidget(self.db_search_input)
         toolbar_layout.addWidget(self.db_refresh_btn)
@@ -1105,11 +1080,12 @@ class MainWindow(QMainWindow):
 
         # 底部：按天清理旧记录
         clean_layout = QHBoxLayout()
-        clean_layout.addWidget(QLabel("清理早于 N 天的记录:"))
+        self.db_clean_label = QLabel()
+        clean_layout.addWidget(self.db_clean_label)
         self.db_clean_days_spin = QSpinBox()
         self.db_clean_days_spin.setRange(1, 365)
         self.db_clean_days_spin.setValue(30)
-        self.db_clean_btn = QPushButton("清理旧记录")
+        self.db_clean_btn = QPushButton()
         clean_layout.addWidget(self.db_clean_days_spin)
         clean_layout.addWidget(self.db_clean_btn)
         clean_layout.addStretch()
@@ -1121,62 +1097,45 @@ class MainWindow(QMainWindow):
         self.db_clean_btn.clicked.connect(self._clean_old_db_records)
         self.db_table_combo.currentIndexChanged.connect(self._refresh_db_table)
 
-        right_panel.addTab(vehicles_tab, "Database")
+        right_panel.addTab(vehicles_tab, "")
 
         # ===== Special Cases Info Tab =====
         exemption_tab = QWidget()
         exemption_layout = QVBoxLayout(exemption_tab)
 
-        info_text = QLabel("""
-<h3>Adaptive Violation Detection - Special Cases</h3>
-<p>This system intelligently identifies special situations and marks them as exempted:</p>
-
-<h4>1. Yielding to Emergency Vehicles</h4>
-<p style="color: #ffd93d;">When ambulance, fire truck, or police car is detected nearby,
-violations (running red light, lane crossing) are marked as "Yielding to Emergency".</p>
-
-<h4>2. Traffic Light Malfunction</h4>
-<p style="color: #ffd93d;">When traffic light shows abnormal status (no signal or irregular flashing),
-related violations are marked as "Signal Malfunction".</p>
-
-<h4>3. Other Special Cases</h4>
-<ul>
-<li>Police Direction</li>
-<li>Emergency Avoidance</li>
-<li>Road Construction Detour</li>
-</ul>
-
-<p><b>Note:</b> All special cases are recorded with snapshots.
-Snapshot filenames include timestamp for later manual review.</p>
-        """)
-        info_text.setWordWrap(True)
-        info_text.setStyleSheet("padding: 10px;")
-        exemption_layout.addWidget(info_text)
+        self.exemption_info = QLabel()
+        self.exemption_info.setWordWrap(True)
+        self.exemption_info.setStyleSheet(
+            f"padding: 16px; background-color: {COLORS['surface']};"
+            f"border-radius: 8px; border: 1px solid {COLORS['border']};"
+            f"color: {COLORS['text']};"
+        )
+        exemption_layout.addWidget(self.exemption_info)
         exemption_layout.addStretch()
 
-        right_panel.addTab(exemption_tab, "Special Cases")
+        right_panel.addTab(exemption_tab, "")
 
-        # ===== Statistics Tab =====
         stats_tab = QWidget()
         stats_tab_layout = QVBoxLayout(stats_tab)
-        self.stats_canvas = StatisticsCanvas(stats_tab)
+        self.stats_canvas = StatisticsCanvas(stats_tab, translator=self._tr)
         stats_tab_layout.addWidget(self.stats_canvas)
 
-        btn_reset_stats = QPushButton("Reset Statistics")
-        btn_reset_stats.clicked.connect(self._reset_statistics)
-        stats_tab_layout.addWidget(btn_reset_stats)
+        self.btn_reset_stats = QPushButton()
+        self.btn_reset_stats.clicked.connect(self._reset_statistics)
+        stats_tab_layout.addWidget(self.btn_reset_stats)
 
-        right_panel.addTab(stats_tab, "Statistics")
+        right_panel.addTab(stats_tab, "")
 
-        # ===== Settings Tab =====
         settings_tab = QWidget()
         settings_layout = QVBoxLayout(settings_tab)
 
-        detect_group = QGroupBox("Detection Settings")
+        self.detect_group = QGroupBox()
+        detect_group = self.detect_group
         detect_layout = QVBoxLayout(detect_group)
 
         conf_layout = QHBoxLayout()
-        conf_layout.addWidget(QLabel("Confidence:"))
+        self.lbl_confidence = QLabel()
+        conf_layout.addWidget(self.lbl_confidence)
         self.spin_confidence = QSpinBox()
         self.spin_confidence.setRange(1, 100)
         self.spin_confidence.setValue(20)
@@ -1185,7 +1144,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         detect_layout.addLayout(conf_layout)
 
         speed_layout = QHBoxLayout()
-        speed_layout.addWidget(QLabel("Speed Limit:"))
+        self.lbl_speed_limit = QLabel()
+        speed_layout.addWidget(self.lbl_speed_limit)
         self.spin_speed_limit = QSpinBox()
         self.spin_speed_limit.setRange(1, 200)
         self.spin_speed_limit.setValue(60)
@@ -1194,7 +1154,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         detect_layout.addLayout(speed_layout)
 
         emergency_layout = QHBoxLayout()
-        emergency_layout.addWidget(QLabel("Emergency Distance:"))
+        self.lbl_emergency_dist = QLabel()
+        emergency_layout.addWidget(self.lbl_emergency_dist)
         self.spin_emergency_dist = QSpinBox()
         self.spin_emergency_dist.setRange(50, 1000)
         self.spin_emergency_dist.setValue(300)
@@ -1203,7 +1164,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         detect_layout.addLayout(emergency_layout)
 
         flow_layout = QHBoxLayout()
-        flow_layout.addWidget(QLabel("Legal Flow Direction:"))
+        self.lbl_flow_dir = QLabel()
+        flow_layout.addWidget(self.lbl_flow_dir)
         self.combo_flow_direction = QComboBox()
         self.combo_flow_direction.addItems([
             'north', 'south', 'east', 'west',
@@ -1213,36 +1175,38 @@ Snapshot filenames include timestamp for later manual review.</p>
         flow_layout.addWidget(self.combo_flow_direction)
         detect_layout.addLayout(flow_layout)
 
-        self.cb_enable_tiling = QCheckBox("Enable tiling (slower, better for distant vehicles)")
+        self.cb_enable_tiling = QCheckBox()
         self.cb_enable_tiling.setChecked(False)
         detect_layout.addWidget(self.cb_enable_tiling)
 
-        self.cb_wrong_way = QCheckBox("Enable wrong-way detection (逆行)")
+        self.cb_wrong_way = QCheckBox()
         self.cb_wrong_way.setChecked(True)
         detect_layout.addWidget(self.cb_wrong_way)
 
-        self.cb_illegal_lane = QCheckBox("Enable illegal lane-change detection (违规变道)")
+        self.cb_illegal_lane = QCheckBox()
         self.cb_illegal_lane.setChecked(True)
         detect_layout.addWidget(self.cb_illegal_lane)
 
-        self.cb_performance = QCheckBox("Enable adaptive performance (FPS monitor & degradation)")
+        self.cb_performance = QCheckBox()
         self.cb_performance.setChecked(True)
         detect_layout.addWidget(self.cb_performance)
 
-        btn_reload_cfg = QPushButton("Reload config/settings.yaml")
-        btn_reload_cfg.clicked.connect(lambda: (self._merge_config_from_yaml(), self._apply_config_to_controls()))
-        detect_layout.addWidget(btn_reload_cfg)
+        self.btn_reload_cfg = QPushButton()
+        self.btn_reload_cfg.clicked.connect(self._reload_config_and_ui)
+        detect_layout.addWidget(self.btn_reload_cfg)
 
         settings_layout.addWidget(detect_group)
 
-        stopline_group = QGroupBox("Stop Line Settings")
+        self.stopline_group = QGroupBox()
+        stopline_group = self.stopline_group
         stopline_layout = QVBoxLayout(stopline_group)
 
-        self.cb_enable_stopline = QCheckBox("Enable Stop Line Detection")
+        self.cb_enable_stopline = QCheckBox()
         stopline_layout.addWidget(self.cb_enable_stopline)
 
         sl_y_layout = QHBoxLayout()
-        sl_y_layout.addWidget(QLabel("Y Position:"))
+        self.lbl_sl_y = QLabel()
+        sl_y_layout.addWidget(self.lbl_sl_y)
         self.spin_sl_y = QSpinBox()
         self.spin_sl_y.setRange(0, 2000)
         self.spin_sl_y.setValue(400)
@@ -1250,7 +1214,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         stopline_layout.addLayout(sl_y_layout)
 
         sl_x_layout = QHBoxLayout()
-        sl_x_layout.addWidget(QLabel("X Range:"))
+        self.lbl_sl_x = QLabel()
+        sl_x_layout.addWidget(self.lbl_sl_x)
         self.spin_sl_x1 = QSpinBox()
         self.spin_sl_x1.setRange(0, 2000)
         self.spin_sl_x1.setValue(100)
@@ -1263,30 +1228,71 @@ Snapshot filenames include timestamp for later manual review.</p>
         stopline_layout.addLayout(sl_x_layout)
 
         # 自动识别停止线按钮
-        self.btn_auto_stopline = QPushButton("Auto Detect Stop Line")
+        self.btn_auto_stopline = QPushButton()
         self.btn_auto_stopline.clicked.connect(self._auto_detect_stop_line)
         stopline_layout.addWidget(self.btn_auto_stopline)
 
         settings_layout.addWidget(stopline_group)
         settings_layout.addStretch()
 
-        right_panel.addTab(settings_tab, "Settings")
+        right_panel.addTab(settings_tab, "")
 
-        # Add to main layout
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        main_layout.addWidget(splitter)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        body_layout.addWidget(splitter)
+        root_layout.addLayout(body_layout, stretch=1)
 
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("Ready")
+        self.statusBar.showMessage(self._tr.tr("status_ready"))
+
+    def _reload_config_and_ui(self) -> None:
+        self._merge_config_from_yaml()
+        lang = self.config.get("gui_language", "zh_CN")
+        if lang in SUPPORTED_LANGUAGES:
+            self._tr.set_language(lang)
+            self.combo_language.blockSignals(True)
+            self.combo_language.setCurrentIndex(0 if lang == "zh_CN" else 1)
+            self.combo_language.blockSignals(False)
+        self._apply_config_to_controls()
+        self._retranslate_ui()
+
+    def _refresh_violation_labels(self) -> None:
+        tr = self._tr
+        stats = self._last_stats
+        self.label_total_violations.setText(tr.tr("total_violations", n=stats.get("total_violations", 0)))
+        self.label_actual_violations.setText(tr.tr("actual_violations", n=stats.get("actual_violations", 0)))
+        self.label_exempted.setText(tr.tr("exempted", n=stats.get("exempted_count", 0)))
+
+    def _refresh_risk_labels(self) -> None:
+        tr = self._tr
+        risks = self._last_collision_risks
+        if risks:
+            highest = risks[0]
+            level = tr.risk_level_label(highest.risk_level.value)
+            self.label_collision_risk.setText(tr.tr("risk_level", level=level))
+            if highest.time_to_collision > 0:
+                unit = tr.tr("sec_unit")
+                self.label_min_ttc.setText(
+                    tr.tr("min_ttc", s=f"{highest.time_to_collision:.1f} {unit}")
+                )
+            else:
+                self.label_min_ttc.setText(tr.tr("min_ttc_none"))
+            self.label_risk_count.setText(tr.tr("active_risks", n=len(risks)))
+        else:
+            self.label_collision_risk.setText(tr.tr("risk_level", level=tr.tr("risk_safe")))
+            self.label_min_ttc.setText(tr.tr("min_ttc_none"))
+            self.label_risk_count.setText(tr.tr("active_risks", n=0))
 
     def _open_video(self):
         """Open video file"""
+        tr = self._tr
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video File", "",
-            "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
+            self, tr.tr("dialog_select_video"), "",
+            tr.tr("filter_video"),
         )
         if file_path:
             self._start_processing(file_path)
@@ -1312,6 +1318,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         self.config['illegal_lane_enabled'] = self.cb_illegal_lane.isChecked()
         self.config['performance_enabled'] = self.cb_performance.isChecked()
         self.config['performance_target_fps'] = self.config.get('fps', 15)
+        self.config['plate_pending_label'] = self._tr.plate_pending_token()
+        self.config['gui_language'] = self._tr.language
 
         if self.cb_enable_stopline.isChecked():
             self.config['stop_line'] = {
@@ -1331,7 +1339,8 @@ Snapshot filenames include timestamp for later manual review.</p>
         self.video_thread.error.connect(self._on_error)
         self.video_thread.start()
 
-        self.statusBar.showMessage("Processing…  (press Stop to end)")
+        self._set_live_badge(True)
+        self.statusBar.showMessage(self._tr.tr("status_processing"))
 
     def _auto_detect_stop_line(self):
         """
@@ -1345,35 +1354,17 @@ Snapshot filenames include timestamp for later manual review.</p>
             box.setIcon(QMessageBox.Information)
             box.setStandardButtons(QMessageBox.Ok)
             box.setDefaultButton(QMessageBox.Ok)
-            box.setStyleSheet("""
-                QMessageBox {
-                    background-color: #020617;
-                }
-                QLabel {
-                    color: #e5e7eb;
-                    font-size: 12px;
-                }
-                QPushButton {
-                    background-color: rgba(59, 130, 246, 0.22);
-                    color: #dbeafe;
-                    border-radius: 6px;
-                    padding: 6px 16px;
-                    min-width: 64px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(59, 130, 246, 0.30);
-                }
-            """)
+            box.setStyleSheet(message_box_stylesheet())
             box.exec_()
 
         if self.current_frame is None:
-            _styled_info("Auto Detect Stop Line", "当前没有视频帧可用，请先打开视频或摄像头。")
+            _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_no_frame"))
             return
 
         frame = self.current_frame.copy()
         h, w = frame.shape[:2]
         if h == 0 or w == 0:
-            _styled_info("Auto Detect Stop Line", "当前帧尺寸无效，无法检测停止线。")
+            _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_bad_frame"))
             return
 
         # 只在画面下半部分做检测，减少干扰
@@ -1399,7 +1390,7 @@ Snapshot filenames include timestamp for later manual review.</p>
         )
 
         if lines is None or len(lines) == 0:
-            _styled_info("Auto Detect Stop Line", "未检测到明显的水平停车线，请在停止线附近暂停画面后重试，或手动设置。")
+            _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_not_found"))
             return
 
         ys = []
@@ -1420,7 +1411,7 @@ Snapshot filenames include timestamp for later manual review.</p>
             xs.extend([x1, x2])
 
         if not ys or not xs:
-            _styled_info("Auto Detect Stop Line", "未检测到稳定的停车线候选，请稍后再试或手动设置。")
+            _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_unstable"))
             return
 
         # 采用中位数减少噪声影响
@@ -1449,9 +1440,8 @@ Snapshot filenames include timestamp for later manual review.</p>
 
         # 友好提示
         _styled_info(
-            "Auto Detect Stop Line",
-            f"已自动检测停止线：Y = {y_global}, X 范围 [{x_start}, {x_end}]。\n"
-            "你可以在 Settings 中微调后重新开始检测。",
+            self._tr.tr("stopline_title"),
+            self._tr.tr("stopline_ok", y=y_global, x1=x_start, x2=x_end),
         )
 
     def _stop_video(self):
@@ -1466,8 +1456,9 @@ Snapshot filenames include timestamp for later manual review.</p>
         if getattr(self, '_db_cleanup', None) is not None:
             self._db_cleanup.stop()
 
+        self._set_live_badge(False)
         self._sync_controls_for_state()
-        self.statusBar.showMessage("Stopped")
+        self.statusBar.showMessage(self._tr.tr("status_stopped"))
 
     def _sync_controls_for_state(self):
         """根据处理状态同步控件启用/禁用（避免误操作）"""
@@ -1512,38 +1503,14 @@ Snapshot filenames include timestamp for later manual review.</p>
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         self._display_frame(frame)
-        self.label_vehicle_count_value.setText(str(len(tracks)))
+        self.card_vehicles.set_value(str(len(tracks)))
 
         if features_list:
             avg_speed = sum(f.speed for f in features_list) / len(features_list)
-            self.label_avg_speed_value.setText(f"{avg_speed:.1f} km/h")
+            self.card_speed.set_value(f"{avg_speed:.1f} km/h")
 
-        # Update collision risk display
-        if collision_risks:
-            highest_risk = collision_risks[0] if collision_risks else None
-            if highest_risk:
-                risk_colors = {
-                    RiskLevel.SAFE: "#86efac",
-                    RiskLevel.LOW: "#fde68a",
-                    RiskLevel.MEDIUM: "#fdba74",
-                    RiskLevel.HIGH: "#fca5a5",
-                    RiskLevel.CRITICAL: "#f0abfc"
-                }
-                color = risk_colors.get(highest_risk.risk_level, "#00ff00")
-                self.label_collision_risk.setText(f"Collision Risk: {highest_risk.risk_level.value.upper()}")
-                self.label_collision_risk.setStyleSheet(f"color: {color}; font-weight: bold;")
-
-                if highest_risk.time_to_collision > 0:
-                    self.label_min_ttc.setText(f"Min TTC: {highest_risk.time_to_collision:.1f}s")
-                else:
-                    self.label_min_ttc.setText("Min TTC: --")
-
-                self.label_risk_count.setText(f"Active Risks: {len(collision_risks)}")
-        else:
-            self.label_collision_risk.setText("Collision Risk: SAFE")
-            self.label_collision_risk.setStyleSheet("color: #00ff00; font-weight: bold;")
-            self.label_min_ttc.setText("Min TTC: --")
-            self.label_risk_count.setText("Active Risks: 0")
+        self._last_collision_risks = collision_risks or []
+        self._refresh_risk_labels()
 
         self.vehicle_table.setRowCount(len(tracks))
         for i, track in enumerate(tracks):
@@ -1567,7 +1534,7 @@ Snapshot filenames include timestamp for later manual review.</p>
             # 维护车辆数据库记录（支持车牌检索）
             if i < len(features_list):
                 f = features_list[i]
-                clean_plate = plate if plate and plate not in ("-", "识别中") else None
+                clean_plate = plate if plate and not self._tr.is_plate_pending(plate) and plate != "-" else None
                 if track.track_id in self._seen_vehicle_tracks:
                     self.database.update_vehicle(
                         track_id=track.track_id,
@@ -1641,25 +1608,31 @@ Snapshot filenames include timestamp for later manual review.</p>
 
     def _on_stats_updated(self, stats: dict):
         """Update statistics"""
+        self._last_stats = stats
+        tr = self._tr
         perf = stats.get('performance') or {}
         if perf:
-            self.label_perf_fps_value.setText(f"{perf.get('avg_fps', '--')}")
+            fps_val = perf.get('avg_fps', '--')
+            self.card_fps.set_value(f"{fps_val}" if fps_val != '--' else "--")
             self.label_perf_degrade_value.setText(
-                f"imgsz {perf.get('imgsz', '--')} · L{perf.get('degradation_level', 0)}"
-                f" · skip {perf.get('frame_skip', 1)}"
+                tr.tr(
+                    "perf_line",
+                    imgsz=perf.get('imgsz', '--'),
+                    level=perf.get('degradation_level', 0),
+                    skip=perf.get('frame_skip', 1),
+                )
             )
-        self.label_emergency_count_value.setText(str(stats.get('emergency_vehicles', 0)))
-        self.label_total_violations.setText(f"Total Violations: {stats.get('total_violations', 0)}")
-        self.label_actual_violations.setText(f"Actual Violations: {stats.get('actual_violations', 0)}")
-        self.label_exempted.setText(f"Exempted (Special Cases): {stats.get('exempted_count', 0)}")
+        self.card_emergency.set_value(str(stats.get('emergency_vehicles', 0)))
+        self._refresh_violation_labels()
 
-        # Update collision risk stats
         risk_stats = stats.get('collision_risks', {})
         if risk_stats:
             total_risks = risk_stats.get('total_risks', 0)
             critical = risk_stats.get('critical', 0)
             high = risk_stats.get('high', 0)
-            self.label_risk_count.setText(f"Active Risks: {total_risks} (Critical: {critical}, High: {high})")
+            self.label_risk_count.setText(
+                tr.tr("active_risks_detail", total=total_risks, critical=critical, high=high)
+            )
 
     def _display_frame(self, frame: np.ndarray):
         """Display frame"""
@@ -1679,7 +1652,7 @@ Snapshot filenames include timestamp for later manual review.</p>
         """缓存违规记录并写入数据库（与 CLI 行为一致）。"""
         self._violation_cache.append(record)
         plate = record.plate_number
-        if plate in (None, '', '-', '识别中'):
+        if plate in (None, '', '-') or self._tr.is_plate_pending(plate):
             plate = None
         try:
             self.database.add_violation(
@@ -1744,7 +1717,8 @@ Snapshot filenames include timestamp for later manual review.</p>
             speed_str = f"{record.speed:.1f}" if record.speed else "-"
             self.violation_table.setItem(row, 3, QTableWidgetItem(speed_str))
 
-            status_item = QTableWidgetItem("Review" if record.is_anomaly else "Violation")
+            status_key = "status_review" if record.is_anomaly else "status_violation"
+            status_item = QTableWidgetItem(self._tr.tr(status_key))
             if record.is_anomaly:
                 status_item.setBackground(QColor(253, 230, 138, 80))  # 柔和黄
                 status_item.setForeground(QColor("#e5e7eb"))
@@ -1783,7 +1757,7 @@ Snapshot filenames include timestamp for later manual review.</p>
         try:
             rows = self.database.get_table(table, limit=200)
         except Exception as exc:
-            QMessageBox.critical(self, "数据库错误", str(exc))
+            QMessageBox.critical(self, self._tr.tr("db_error_title"), str(exc))
             return
 
         # 按车牌过滤（仅 vehicles / violations）
@@ -1828,11 +1802,15 @@ Snapshot filenames include timestamp for later manual review.</p>
         if not hasattr(self, "db_table"):
             return
         if self.db_table_combo.currentText() != "vehicles":
-            QMessageBox.information(self, "删除车辆记录", "当前仅在 vehicles 表中支持删除操作。")
+            QMessageBox.information(
+                self, self._tr.tr("db_delete_title"), self._tr.tr("db_delete_only_vehicles"),
+            )
             return
         rows = self.db_table.selectionModel().selectedRows()
         if not rows:
-            QMessageBox.information(self, "删除车辆记录", "请先在表格中选择要删除的记录。")
+            QMessageBox.information(
+                self, self._tr.tr("db_delete_title"), self._tr.tr("db_delete_select"),
+            )
             return
         ids = []
         for index in rows:
@@ -1846,28 +1824,12 @@ Snapshot filenames include timestamp for later manual review.</p>
             return
 
         box = QMessageBox(self)
-        box.setWindowTitle("确认删除")
-        box.setText(f"确定要删除选中的 {len(ids)} 条车辆记录吗？此操作不可恢复。")
+        box.setWindowTitle(self._tr.tr("db_confirm_delete_title"))
+        box.setText(self._tr.tr("db_confirm_delete", n=len(ids)))
         box.setIcon(QMessageBox.Warning)
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
-        box.setStyleSheet("""
-            QMessageBox {
-                background-color: #020617;
-            }
-            QLabel {
-                color: #e5e7eb;
-            }
-            QPushButton {
-                background-color: rgba(248, 113, 113, 0.18);
-                color: #fee2e2;
-                border-radius: 6px;
-                padding: 6px 14px;
-            }
-            QPushButton:hover {
-                background-color: rgba(248, 113, 113, 0.26);
-            }
-        """)
+        box.setStyleSheet(message_box_stylesheet())
         reply = box.exec_()
         if reply != QMessageBox.Yes:
             return
@@ -1875,35 +1837,17 @@ Snapshot filenames include timestamp for later manual review.</p>
         try:
             deleted = self.database.delete_vehicles_by_ids(ids)
         except Exception as exc:
-            QMessageBox.critical(self, "数据库错误", str(exc))
+            QMessageBox.critical(self, self._tr.tr("db_error_title"), str(exc))
             return
 
         # 美化后的“删除完成”提示框
         info_box = QMessageBox(self)
-        info_box.setWindowTitle("删除完成")
-        info_box.setText(f"已删除 {deleted} 条车辆记录。")
+        info_box.setWindowTitle(self._tr.tr("db_deleted_title"))
+        info_box.setText(self._tr.tr("db_deleted", n=deleted))
         info_box.setIcon(QMessageBox.Information)
         info_box.setStandardButtons(QMessageBox.Ok)
         info_box.setDefaultButton(QMessageBox.Ok)
-        info_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #020617;
-            }
-            QLabel {
-                color: #e5e7eb;
-                font-size: 12px;
-            }
-            QPushButton {
-                background-color: rgba(34, 197, 94, 0.22);
-                color: #bbf7d0;
-                border-radius: 6px;
-                padding: 6px 16px;
-                min-width: 64px;
-            }
-            QPushButton:hover {
-                background-color: rgba(34, 197, 94, 0.30);
-            }
-        """)
+        info_box.setStyleSheet(message_box_stylesheet())
         info_box.exec_()
         self._refresh_db_table()
 
@@ -1911,37 +1855,23 @@ Snapshot filenames include timestamp for later manual review.</p>
         """按天清理旧记录（车辆 + 违规 + 流量）"""
         days = self.db_clean_days_spin.value()
         box = QMessageBox(self)
-        box.setWindowTitle("确认清理")
-        box.setText(f"确定要清理 {days} 天之前的车辆、违规和流量记录吗？此操作不可恢复。")
+        box.setWindowTitle(self._tr.tr("db_confirm_clean_title"))
+        box.setText(self._tr.tr("db_confirm_clean", days=days))
         box.setIcon(QMessageBox.Question)
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
-        box.setStyleSheet("""
-            QMessageBox {
-                background-color: #020617;
-            }
-            QLabel {
-                color: #e5e7eb;
-            }
-            QPushButton {
-                background-color: rgba(148, 163, 184, 0.15);
-                color: #e5e7eb;
-                border-radius: 6px;
-                padding: 6px 14px;
-            }
-            QPushButton:hover {
-                background-color: rgba(148, 163, 184, 0.22);
-            }
-        """)
+        box.setStyleSheet(message_box_stylesheet())
         reply = box.exec_()
         if reply != QMessageBox.Yes:
             return
         try:
             self.database.clear_old_records(days=days)
         except Exception as exc:
-            QMessageBox.critical(self, "数据库错误", str(exc))
+            QMessageBox.critical(self, self._tr.tr("db_error_title"), str(exc))
             return
-        QMessageBox.information(self, "清理完成", f"已清理早于 {days} 天的历史记录。")
+        QMessageBox.information(
+            self, self._tr.tr("clean_complete_title"), self._tr.tr("clean_done", days=days),
+        )
         self._refresh_db_table()
 
     def _search_plate(self):
@@ -1953,23 +1883,26 @@ Snapshot filenames include timestamp for later manual review.</p>
         results = self.database.search_by_plate(plate)
         if results:
             QMessageBox.information(
-                self, "Search Results",
-                f"Found {len(results)} records"
+                self,
+                self._tr.tr("btn_search"),
+                self._tr.tr("search_found", n=len(results)),
             )
         else:
-            QMessageBox.information(self, "Search Results", "No matching records found")
+            QMessageBox.information(
+                self, self._tr.tr("btn_search"), self._tr.tr("search_not_found"),
+            )
 
     def _reset_statistics(self):
         """Reset statistics charts"""
         self.stats_canvas.reset()
         self._frame_counter = 0
-        self.statusBar.showMessage("Statistics reset")
+        self.statusBar.showMessage(self._tr.tr("status_stats_reset"))
 
     def _on_error(self, error: str):
         """Handle error"""
         self._is_processing = False
         self._sync_controls_for_state()
-        QMessageBox.critical(self, "Error", error)
+        QMessageBox.critical(self, self._tr.tr("error_title"), error)
         self._stop_video()
 
     def closeEvent(self, event):

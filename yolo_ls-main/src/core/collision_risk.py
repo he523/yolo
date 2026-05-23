@@ -114,7 +114,7 @@ class CollisionRiskPredictor:
                  prediction_horizon: int = 15,
                  fps: float = 15.0,
                  collision_threshold: float = 150.0,  # 增大默认阈值适应高分辨率
-                 ttc_thresholds: Dict[str, float] = None,
+                 ttc_thresholds: Optional[Dict[str, float]] = None,
                  model_path: Optional[str] = None,
                  device: str = "cpu"):
         """
@@ -129,7 +129,7 @@ class CollisionRiskPredictor:
         """
         self.history_length = history_length
         self.prediction_horizon = prediction_horizon
-        self.fps = fps
+        self.fps = self._normalize_fps(fps)
         self.collision_threshold = collision_threshold
         use_cuda = device == "cuda" and torch.cuda.is_available()
         self.device = torch.device("cuda" if use_cuda else "cpu")
@@ -156,6 +156,13 @@ class CollisionRiskPredictor:
             self.load_model(model_path)
 
         self.predictor.eval()
+
+    @staticmethod
+    def _normalize_fps(fps: Optional[float], default: float = 15.0) -> float:
+        """避免 fps 为 0 或负数导致 TTC 除零。"""
+        if fps is None or fps <= 0:
+            return default
+        return float(fps)
 
     def load_model(self, model_path: str) -> bool:
         """Load trained trajectory predictor checkpoint."""
@@ -188,7 +195,7 @@ class CollisionRiskPredictor:
             payload.update(extra)
         torch.save(payload, path)
 
-    def update(self, tracks: List[Dict]) -> List[CollisionRisk]:
+    def update(self, tracks: List[Dict[str, Any]]) -> List[CollisionRisk]:
         """
         Update with current frame and predict collision risks
 
@@ -295,23 +302,27 @@ class CollisionRiskPredictor:
         traj1 = predictions[id1]
         traj2 = predictions[id2]
 
-        # Find minimum distance and time
-        min_dist = float('inf')
-        min_time_idx = -1
-        collision_point = None
-
-        for t in range(min(len(traj1), len(traj2))):
-            dist = np.sqrt(
-                (traj1[t][0] - traj2[t][0])**2 +
-                (traj1[t][1] - traj2[t][1])**2
+        n_steps = min(len(traj1), len(traj2))
+        if n_steps == 0:
+            return CollisionRisk(
+                vehicle1_id=id1,
+                vehicle2_id=id2,
+                risk_level=RiskLevel.SAFE,
+                time_to_collision=-1,
+                collision_point=None,
+                confidence=0.5,
+                predicted_trajectories={id1: traj1, id2: traj2},
             )
-            if dist < min_dist:
-                min_dist = dist
-                min_time_idx = t
-                collision_point = (
-                    (traj1[t][0] + traj2[t][0]) / 2,
-                    (traj1[t][1] + traj2[t][1]) / 2
-                )
+
+        t1 = np.asarray(traj1[:n_steps], dtype=np.float64)
+        t2 = np.asarray(traj2[:n_steps], dtype=np.float64)
+        dists = np.linalg.norm(t1 - t2, axis=1)
+        min_time_idx = int(np.argmin(dists))
+        min_dist = float(dists[min_time_idx])
+        collision_point = (
+            (t1[min_time_idx, 0] + t2[min_time_idx, 0]) / 2,
+            (t1[min_time_idx, 1] + t2[min_time_idx, 1]) / 2,
+        )
 
         # Calculate TTC
         if min_dist < self.collision_threshold:
@@ -378,8 +389,8 @@ class CollisionRiskPredictor:
         vel2 = (hist2[-1][2], hist2[-1][3])
 
         # 计算速度大小
-        speed1 = np.sqrt(vel1[0]**2 + vel1[1]**2)
-        speed2 = np.sqrt(vel2[0]**2 + vel2[1]**2)
+        speed1 = float(np.hypot(vel1[0], vel1[1]))
+        speed2 = float(np.hypot(vel2[0], vel2[1]))
 
         # 计算速度方向（角度）
         if speed1 < 1 or speed2 < 1:  # 速度太小，忽略
@@ -397,7 +408,7 @@ class CollisionRiskPredictor:
             return None  # 不是同向行驶
 
         # 计算当前距离
-        current_dist = np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+        current_dist = float(np.hypot(pos1[0] - pos2[0], pos1[1] - pos2[1]))
 
         # 计算安全跟车距离（基于速度）
         # 安全距离 = 速度 * 反应时间系数 + 最小安全距离
@@ -512,7 +523,7 @@ class CollisionRiskPredictor:
 
     def draw_predictions(self, frame: np.ndarray,
                          risks: List[CollisionRisk],
-                         tracks: List[Dict] = None) -> np.ndarray:
+                         tracks: Optional[List[Dict[str, Any]]] = None) -> np.ndarray:
         """
         Draw collision risk indicators on frame
         Args:
@@ -576,7 +587,7 @@ class CollisionRiskPredictor:
 
         return annotated
 
-    def get_risk_summary(self, risks: List[CollisionRisk]) -> Dict:
+    def get_risk_summary(self, risks: List[CollisionRisk]) -> Dict[str, Any]:
         """Get summary of current risks"""
         summary = {
             'total_risks': len(risks),

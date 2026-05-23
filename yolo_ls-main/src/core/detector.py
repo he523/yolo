@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 from ultralytics import YOLO
 
-from src.utils.bbox import clamp_bbox
+from src.utils.bbox import clamp_bbox, iou_xyxy_batch
 from src.utils.constants import (
     DEFAULT_TILING_MIN_DETS,
     DEFAULT_TILING_OVERLAP,
@@ -293,29 +293,18 @@ class VehicleDetector:
         for cls_id, items in by_cls.items():
             items = sorted(items, key=lambda d: d.confidence, reverse=True)
             kept: List[Detection] = []
+            kept_boxes = np.empty((0, 4), dtype=np.float64)
             for d in items:
-                if all(self._iou(d.bbox, k.bbox) < iou_thr for k in kept):
-                    kept.append(d)
+                if kept_boxes.size > 0:
+                    overlaps = iou_xyxy_batch(d.bbox, kept_boxes) >= iou_thr
+                    if np.any(overlaps):
+                        continue
+                kept.append(d)
+                kept_boxes = np.vstack([kept_boxes, d.bbox]) if kept_boxes.size else np.array(
+                    [d.bbox], dtype=np.float64
+                )
             merged.extend(kept)
         return merged
-
-    @staticmethod
-    def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        inter_x1 = max(ax1, bx1)
-        inter_y1 = max(ay1, by1)
-        inter_x2 = min(ax2, bx2)
-        inter_y2 = min(ay2, by2)
-        iw = max(0, inter_x2 - inter_x1)
-        ih = max(0, inter_y2 - inter_y1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-        union = area_a + area_b - inter + 1e-6
-        return float(inter / union)
 
     def detect_vehicles(self, frame: np.ndarray) -> List[Detection]:
         """仅检测车辆"""

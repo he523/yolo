@@ -1,9 +1,12 @@
 """特种车辆检测模块检测救护车、消防车、警车等特种车辆"""
+import logging
 import cv2
 import numpy as np
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 class EmergencyVehicleType(Enum):
     """特种车辆类型"""
@@ -147,7 +150,7 @@ class EmergencyVehicleDetector:
         try:
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         except cv2.error as e:
-            print(f"Warning: Error converting ROI to HSV: {e}")
+            logger.warning("Error converting ROI to HSV: %s", e)
             return False, []
 
         detected_colors = []
@@ -171,7 +174,7 @@ class EmergencyVehicleDetector:
                 try:
                     mask = cv2.inRange(top_roi, np.array(lower), np.array(upper))
                 except cv2.error as e:
-                    print(f"Warning: Error in cv2.inRange for color {color_name}: {e}")
+                    logger.warning("Error in cv2.inRange for color %s: %s", color_name, e)
                     continue
 
                 # 形态学操作去噪
@@ -269,7 +272,7 @@ class EmergencyVehicleDetector:
             ev_center = ((ex1 + ex2) // 2, (ey1 + ey2) // 2)
 
             # 计算距离
-            distance = np.sqrt((center[0] - ev_center[0])**2 + (center[1] - ev_center[1])**2)
+            distance = float(np.hypot(center[0] - ev_center[0], center[1] - ev_center[1]))
             if distance < distance_threshold:
                 return True
 

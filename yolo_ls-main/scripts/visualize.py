@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 
 # 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+from src.utils.matplotlib_zh import configure_matplotlib_chinese
+configure_matplotlib_chinese()
 
 
 def plot_training_curves(experiment_dir: str, output_dir: str = None):
