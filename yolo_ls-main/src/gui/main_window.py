@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.video import VideoStream
 from src.core import VehicleDetector, ByteTracker, FeatureExtractor
 from src.core.adaptive_violation import AdaptiveViolationDetector, ViolationRecord, AnomalyReason
+from src.core.lane_violation import build_analyzer_from_violation_config
 from src.core.stgat import VehicleInteractionGraph
 from src.core.collision_risk import CollisionRiskPredictor, RiskLevel
 from src.ocr import PlateReader
@@ -46,6 +47,7 @@ from src.database.scheduler import start_db_cleanup_from_config
 from src.utils.config import load_config
 from src.utils.model_manager import ModelManager
 from src.utils.performance import PerformanceOptimizer, FPSMonitor
+from src.utils.stop_line_detect import detect_stop_line
 from src.gui.i18n import Translator, SUPPORTED_LANGUAGES
 from src.gui.theme import (
     COLORS,
@@ -218,6 +220,79 @@ class VideoThread(QThread):
         self.interaction_graph: Optional[VehicleInteractionGraph] = None
         self.collision_predictor: Optional[CollisionRiskPredictor] = None
         self.plate_reader: Optional[PlateReader] = None
+        self._perf_optimizer: Optional[PerformanceOptimizer] = None
+        self._fps_monitor: Optional[FPSMonitor] = None
+        self._runtime_perf_enabled = False
+
+    def apply_runtime_settings(self, settings: dict) -> None:
+        """Apply GUI settings while video processing is running."""
+        if not settings:
+            return
+
+        self.config.update(settings)
+
+        if self.detector is not None:
+            if 'confidence' in settings:
+                self.detector.confidence = float(settings['confidence'])
+            enable_tiling = bool(self.config.get('enable_tiling', False))
+            if self._perf_optimizer is not None:
+                self._perf_optimizer.base_enable_tiling = enable_tiling
+                if not enable_tiling:
+                    self._perf_optimizer._plan.enable_tiling = False
+            if not self._runtime_perf_enabled:
+                self.detector.enable_tiling = enable_tiling
+                self.detector.imgsz = int(self.config.get('imgsz', 768))
+
+        if 'performance_enabled' in settings:
+            self._runtime_perf_enabled = bool(settings['performance_enabled'])
+            if (
+                self._runtime_perf_enabled
+                and self._fps_monitor is None
+                and self._perf_optimizer is not None
+            ):
+                self._fps_monitor = FPSMonitor(
+                    target_fps=float(
+                        self.config.get('performance_target_fps', self.config.get('fps', 15))
+                    ),
+                    warmup_frames=int(self.config.get('performance_warmup_frames', 45)),
+                    low_fps_checks=int(self.config.get('performance_low_fps_checks', 5)),
+                )
+                self._fps_monitor.mark_ready()
+            if not self._runtime_perf_enabled and self.detector is not None:
+                self.detector.imgsz = int(self.config.get('imgsz', 768))
+                self.detector.enable_tiling = bool(self.config.get('enable_tiling', False))
+
+        if self.violation_detector is None:
+            return
+
+        if 'wrong_way_enabled' in settings:
+            self.violation_detector.wrong_way_enabled = bool(settings['wrong_way_enabled'])
+        if 'illegal_lane_enabled' in settings:
+            self.violation_detector.illegal_lane_enabled = bool(settings['illegal_lane_enabled'])
+        if 'speed_limit' in settings:
+            self.violation_detector.speed_limit = float(settings['speed_limit'])
+        if 'emergency_distance' in settings:
+            self.violation_detector.emergency_distance = int(settings['emergency_distance'])
+        if 'expected_flow_direction' in settings:
+            flow = str(settings['expected_flow_direction']).lower()
+            if flow != self.violation_detector.expected_flow_direction:
+                self.violation_detector.expected_flow_direction = flow
+                self.violation_detector.lane_analyzer = build_analyzer_from_violation_config(
+                    expected_flow_direction=flow,
+                    lane_change_lateral_px=self.violation_detector.lane_change_lateral_px,
+                    lane_change_min_speed_kmh=self.violation_detector.lane_change_min_speed_kmh,
+                    history_len=self.violation_detector.track_history_maxlen,
+                )
+        if 'stop_line' in settings:
+            stop_line = settings['stop_line']
+            if stop_line:
+                self.violation_detector.set_stop_line(
+                    int(stop_line['y']),
+                    int(stop_line['x_start']),
+                    int(stop_line['x_end']),
+                )
+            else:
+                self.violation_detector.stop_line = None
 
     def run(self):
         """Run video processing"""
@@ -255,6 +330,9 @@ class VideoThread(QThread):
                 )
                 if perf_enabled else None
             )
+            self._perf_optimizer = perf
+            self._fps_monitor = fps_monitor
+            self._runtime_perf_enabled = perf_enabled
 
             self.detector = VehicleDetector(
                 model_path=yolo_path,
@@ -345,11 +423,14 @@ class VideoThread(QThread):
                 fps_monitor.mark_ready()
 
             while self.running:
+                perf_enabled = self._runtime_perf_enabled
+                perf = self._perf_optimizer
+                fps_monitor = self._fps_monitor
                 if self.video_stream is None or self.video_stream.cap is None:
                     break
 
                 frame_count += 1
-                if perf_enabled and not perf.should_process_frame(frame_count):
+                if perf_enabled and perf is not None and not perf.should_process_frame(frame_count):
                     if not self.video_stream.grab():
                         break
                     continue
@@ -359,18 +440,23 @@ class VideoThread(QThread):
                 if not ret or frame is None:
                     break
 
-                if perf_enabled:
+                if perf_enabled and perf is not None:
                     self.detector.imgsz = perf.get_imgsz()
                     self.detector.enable_tiling = perf.get_enable_tiling()
+                elif self.detector is not None:
+                    self.detector.imgsz = int(self.config.get('imgsz', 768))
+                    self.detector.enable_tiling = bool(self.config.get('enable_tiling', False))
 
                 effective_risk_interval = (
-                    perf.get_risk_interval(base_risk_interval) if perf_enabled else base_risk_interval
+                    perf.get_risk_interval(base_risk_interval)
+                    if perf_enabled and perf is not None else base_risk_interval
                 )
                 effective_ocr_interval = (
-                    perf.get_ocr_interval(base_ocr_interval) if perf_enabled else base_ocr_interval
+                    perf.get_ocr_interval(base_ocr_interval)
+                    if perf_enabled and perf is not None else base_ocr_interval
                 )
                 risk_active = bool(self.config.get('enable_risk', True)) and not (
-                    perf_enabled and perf.risk_disabled()
+                    perf_enabled and perf is not None and perf.risk_disabled()
                 )
 
                 # ===== 1) 检测：单次推理为主，避免每帧多次 predict 导致卡顿 =====
@@ -490,7 +576,7 @@ class VideoThread(QThread):
                         annotated_frame, collision_risks, track_data
                     )
 
-                if perf_enabled and fps_monitor and frame_count % 30 == 0:
+                if perf_enabled and perf is not None and fps_monitor and frame_count % 30 == 0:
                     status = perf.get_status()
                     cv2.putText(
                         annotated_frame,
@@ -511,7 +597,7 @@ class VideoThread(QThread):
                         stats['collision_risks'] = self.collision_predictor.get_risk_summary(collision_risks)
                     else:
                         stats['collision_risks'] = {}
-                    if perf_enabled and fps_monitor:
+                    if perf_enabled and perf is not None and fps_monitor:
                         pstatus = perf.get_status()
                         stats['performance'] = {
                             'avg_fps': round(fps_monitor.avg_fps, 1),
@@ -521,7 +607,7 @@ class VideoThread(QThread):
                         }
                     self.stats_updated.emit(stats)
 
-                if perf_enabled and fps_monitor:
+                if perf_enabled and perf is not None and fps_monitor:
                     fps_monitor.tick(time.perf_counter() - frame_start)
                     plan = fps_monitor.check_performance()
                     if plan:
@@ -562,6 +648,7 @@ class MainWindow(QMainWindow):
         self._violation_cache: deque[ViolationRecord] = deque(maxlen=500)
         self._max_violation_rows = 200
         self._is_processing = False
+        self._suppress_settings_apply = False
 
         self.config = {
             'fps': 15,
@@ -732,22 +819,91 @@ class MainWindow(QMainWindow):
 
     def _apply_config_to_controls(self):
         """将 config 同步到设置面板控件。"""
-        self.spin_confidence.setValue(int(self.config.get('confidence', 0.2) * 100))
-        self.spin_speed_limit.setValue(int(self.config.get('speed_limit', 60)))
-        self.spin_emergency_dist.setValue(int(self.config.get('emergency_distance', 300)))
-        idx = self.combo_flow_direction.findText(self.config.get('expected_flow_direction', 'south'))
-        if idx >= 0:
-            self.combo_flow_direction.setCurrentIndex(idx)
-        self.cb_enable_tiling.setChecked(bool(self.config.get('enable_tiling', False)))
-        self.cb_wrong_way.setChecked(bool(self.config.get('wrong_way_enabled', True)))
-        self.cb_illegal_lane.setChecked(bool(self.config.get('illegal_lane_enabled', True)))
-        self.cb_performance.setChecked(bool(self.config.get('performance_enabled', True)))
-        sl = self.config.get('stop_line')
-        if sl:
-            self.cb_enable_stopline.setChecked(True)
-            self.spin_sl_y.setValue(int(sl.get('y', 430)))
-            self.spin_sl_x1.setValue(int(sl.get('x_start', 200)))
-            self.spin_sl_x2.setValue(int(sl.get('x_end', 1100)))
+        self._suppress_settings_apply = True
+        try:
+            self.spin_confidence.setValue(int(self.config.get('confidence', 0.2) * 100))
+            self.spin_speed_limit.setValue(int(self.config.get('speed_limit', 60)))
+            self.spin_emergency_dist.setValue(int(self.config.get('emergency_distance', 300)))
+            idx = self.combo_flow_direction.findText(self.config.get('expected_flow_direction', 'south'))
+            if idx >= 0:
+                self.combo_flow_direction.setCurrentIndex(idx)
+            self.cb_enable_tiling.setChecked(bool(self.config.get('enable_tiling', False)))
+            self.cb_wrong_way.setChecked(bool(self.config.get('wrong_way_enabled', True)))
+            self.cb_illegal_lane.setChecked(bool(self.config.get('illegal_lane_enabled', True)))
+            self.cb_performance.setChecked(bool(self.config.get('performance_enabled', True)))
+            sl = self.config.get('stop_line')
+            if sl:
+                self.cb_enable_stopline.setChecked(True)
+                self.spin_sl_y.setValue(int(sl.get('y', 430)))
+                self.spin_sl_x1.setValue(int(sl.get('x_start', 200)))
+                self.spin_sl_x2.setValue(int(sl.get('x_end', 1100)))
+            else:
+                self.cb_enable_stopline.setChecked(False)
+        finally:
+            self._suppress_settings_apply = False
+
+    def _collect_detection_settings_from_ui(self) -> dict:
+        """Read detection-related settings from the settings panel."""
+        settings = {
+            'confidence': self.spin_confidence.value() / 100,
+            'speed_limit': self.spin_speed_limit.value(),
+            'emergency_distance': self.spin_emergency_dist.value(),
+            'expected_flow_direction': self.combo_flow_direction.currentText(),
+            'enable_tiling': self.cb_enable_tiling.isChecked(),
+            'wrong_way_enabled': self.cb_wrong_way.isChecked(),
+            'illegal_lane_enabled': self.cb_illegal_lane.isChecked(),
+            'performance_enabled': self.cb_performance.isChecked(),
+            'performance_target_fps': self.config.get('fps', 15),
+        }
+        if self.cb_enable_stopline.isChecked():
+            settings['stop_line'] = {
+                'y': self.spin_sl_y.value(),
+                'x_start': self.spin_sl_x1.value(),
+                'x_end': self.spin_sl_x2.value(),
+            }
+        else:
+            settings['stop_line'] = None
+        return settings
+
+    def _connect_runtime_setting_controls(self) -> None:
+        """Toggle detection features immediately when settings change."""
+        for checkbox in (
+            self.cb_enable_tiling,
+            self.cb_wrong_way,
+            self.cb_illegal_lane,
+            self.cb_performance,
+            self.cb_enable_stopline,
+        ):
+            checkbox.stateChanged.connect(self._on_detection_settings_changed)
+
+        for spinbox in (
+            self.spin_confidence,
+            self.spin_speed_limit,
+            self.spin_emergency_dist,
+            self.spin_sl_y,
+            self.spin_sl_x1,
+            self.spin_sl_x2,
+        ):
+            spinbox.valueChanged.connect(self._on_detection_settings_changed)
+
+        self.combo_flow_direction.currentIndexChanged.connect(self._on_detection_settings_changed)
+
+    def _on_detection_settings_changed(self, *_args) -> None:
+        if self._suppress_settings_apply:
+            return
+        self._push_detection_settings_to_runtime()
+
+    def _push_detection_settings_to_runtime(self) -> None:
+        """Sync settings panel values into config and the active video thread."""
+        settings = self._collect_detection_settings_from_ui()
+        self.config.update(settings)
+
+        running = bool(self.video_thread and self.video_thread.isRunning())
+        if running:
+            self.video_thread.apply_runtime_settings(settings)
+            self.statusBar.showMessage(self._tr.tr("status_settings_applied"), 3000)
+        elif self._is_processing:
+            self.statusBar.showMessage(self._tr.tr("status_settings_saved"), 2000)
 
     def _apply_global_style(self):
         """应用全局深色主题（见 src/gui/theme.py）。"""
@@ -1235,6 +1391,8 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(stopline_group)
         settings_layout.addStretch()
 
+        self._connect_runtime_setting_controls()
+
         right_panel.addTab(settings_tab, "")
 
         splitter = QSplitter(Qt.Horizontal)
@@ -1309,26 +1467,9 @@ class MainWindow(QMainWindow):
         self._is_processing = True
         self._sync_controls_for_state()
 
-        self.config['confidence'] = self.spin_confidence.value() / 100
-        self.config['speed_limit'] = self.spin_speed_limit.value()
-        self.config['emergency_distance'] = self.spin_emergency_dist.value()
-        self.config['expected_flow_direction'] = self.combo_flow_direction.currentText()
-        self.config['enable_tiling'] = self.cb_enable_tiling.isChecked()
-        self.config['wrong_way_enabled'] = self.cb_wrong_way.isChecked()
-        self.config['illegal_lane_enabled'] = self.cb_illegal_lane.isChecked()
-        self.config['performance_enabled'] = self.cb_performance.isChecked()
-        self.config['performance_target_fps'] = self.config.get('fps', 15)
+        self.config.update(self._collect_detection_settings_from_ui())
         self.config['plate_pending_label'] = self._tr.plate_pending_token()
         self.config['gui_language'] = self._tr.language
-
-        if self.cb_enable_stopline.isChecked():
-            self.config['stop_line'] = {
-                'y': self.spin_sl_y.value(),
-                'x_start': self.spin_sl_x1.value(),
-                'x_end': self.spin_sl_x2.value()
-            }
-        else:
-            self.config['stop_line'] = None
 
         self._plate_cache = {}
         self._seen_vehicle_tracks = set()
@@ -1343,10 +1484,7 @@ class MainWindow(QMainWindow):
         self.statusBar.showMessage(self._tr.tr("status_processing"))
 
     def _auto_detect_stop_line(self):
-        """
-        基于当前画面自动估计一条停止线位置，并填入设置面板。
-        实现思路：在下半部分 ROI 中用 Hough 检测近乎水平的亮线，聚合得到 y / x 范围。
-        """
+        """基于当前画面自动估计停止线位置，并填入设置面板。"""
         def _styled_info(title: str, text: str):
             box = QMessageBox(self)
             box.setWindowTitle(title)
@@ -1367,76 +1505,23 @@ class MainWindow(QMainWindow):
             _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_bad_frame"))
             return
 
-        # 只在画面下半部分做检测，减少干扰
-        roi_top = int(h * 0.45)
-        roi = frame[roi_top:h, 0:w]
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        # 增强对亮色实线的响应
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, binary = cv2.threshold(blur, 180, 255, cv2.THRESH_BINARY)
-
-        # 形态学闭运算，连通断裂的线段
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        lines = cv2.HoughLinesP(
-            binary,
-            rho=1,
-            theta=np.pi / 180,
-            threshold=80,
-            minLineLength=int(w * 0.35),
-            maxLineGap=20,
-        )
-
-        if lines is None or len(lines) == 0:
+        result = detect_stop_line(frame)
+        if result is None:
             _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_not_found"))
             return
 
-        ys = []
-        xs = []
-        for l in lines:
-            x1, y1, x2, y2 = l[0]
-            # 在 ROI 内的 y
-            dy = y2 - y1
-            dx = x2 - x1
-            if dx == 0:
-                continue
-            slope = abs(dy / dx)
-            # 只保留近乎水平的线段
-            if slope > 0.15:
-                continue
-            y_mid = (y1 + y2) / 2.0
-            ys.append(y_mid)
-            xs.extend([x1, x2])
+        y_global, x_start, x_end = result
 
-        if not ys or not xs:
-            _styled_info(self._tr.tr("stopline_title"), self._tr.tr("stopline_unstable"))
-            return
-
-        # 采用中位数减少噪声影响
-        y_roi = int(float(np.median(ys)))
-        y_global = roi_top + y_roi
-        x_start = max(0, int(min(xs)))
-        x_end = min(w - 1, int(max(xs)))
-
-        # 更新设置面板
-        self.spin_sl_y.setValue(y_global)
-        self.spin_sl_x1.setValue(x_start)
-        self.spin_sl_x2.setValue(x_end)
-        self.cb_enable_stopline.setChecked(True)
-
-        # 尝试立即应用到运行中的检测线程
+        self._suppress_settings_apply = True
         try:
-            if self.video_thread and self.video_thread.violation_detector:
-                self.video_thread.violation_detector.set_stop_line(
-                    y=y_global,
-                    x_start=x_start,
-                    x_end=x_end,
-                )
-        except Exception:
-            # 失败不影响 GUI，其它地方会在下次 start 时应用
-            pass
+            self.spin_sl_y.setValue(y_global)
+            self.spin_sl_x1.setValue(x_start)
+            self.spin_sl_x2.setValue(x_end)
+            self.cb_enable_stopline.setChecked(True)
+        finally:
+            self._suppress_settings_apply = False
+
+        self._push_detection_settings_to_runtime()
 
         # 友好提示
         _styled_info(

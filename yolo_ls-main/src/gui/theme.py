@@ -1,14 +1,20 @@
 """GUI 主题：黑底白字、全局 QSS。"""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Tuple
 
 from PyQt5.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QWidget
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QFont
 
 if TYPE_CHECKING:
     from src.gui.i18n import Translator
+
+_GUI_DIR = Path(__file__).resolve().parent
+_CHECKBOX_CHECK_ICON = QUrl.fromLocalFile(
+    str(_GUI_DIR / "assets" / "checkbox_check.png")
+).toString()
 
 # 黑底白字
 COLORS = {
@@ -23,6 +29,9 @@ COLORS = {
     "text_dim": "#737373",
     "accent": "#ffffff",
     "accent_soft": "rgba(255, 255, 255, 0.1)",
+    "success": "#22c55e",
+    "success_soft": "rgba(34, 197, 94, 0.18)",
+    "checkbox_border": "#737373",
     "chart_bg": "#000000",
     "chart_grid": "#333333",
 }
@@ -154,16 +163,45 @@ def global_stylesheet() -> str:
             border: 1px solid {c['border']};
         }}
 
-        QCheckBox {{ color: {c['text']}; spacing: 8px; }}
+        QCheckBox {{
+            color: {c['text_muted']};
+            spacing: 10px;
+            padding: 3px 0;
+        }}
+        QCheckBox:checked {{
+            color: {c['text']};
+            font-weight: 600;
+        }}
+        QCheckBox:disabled {{
+            color: {c['text_dim']};
+        }}
         QCheckBox::indicator {{
-            width: 16px; height: 16px;
-            border: 1px solid {c['border']};
-            border-radius: 3px;
+            width: 18px;
+            height: 18px;
+            border: 2px solid {c['checkbox_border']};
+            border-radius: 4px;
             background: {c['bg_elevated']};
         }}
+        QCheckBox::indicator:unchecked:hover {{
+            border-color: {c['border_focus']};
+            background: {c['surface_hover']};
+        }}
         QCheckBox::indicator:checked {{
-            background: {c['text']};
-            border-color: {c['text']};
+            background: {c['success']};
+            border-color: {c['success']};
+            image: url("{_CHECKBOX_CHECK_ICON}");
+        }}
+        QCheckBox::indicator:checked:hover {{
+            background: #16a34a;
+            border-color: #16a34a;
+        }}
+        QCheckBox::indicator:disabled {{
+            border-color: {c['border']};
+            background: {c['surface']};
+        }}
+        QCheckBox::indicator:checked:disabled {{
+            background: #3f3f46;
+            border-color: #3f3f46;
         }}
 
         QPushButton {{
