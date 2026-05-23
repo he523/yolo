@@ -1,14 +1,15 @@
 version: '3.8'
 
 services:
-  traffic-analysis:
+  # GUI 模式服务（含图形界面）
+  traffic-analysis-gui:
     build:
       context: .
       dockerfile: Dockerfile
     image: traffic-analysis:latest
-    container_name: traffic-analysis
+    container_name: traffic-analysis-gui
 
-    # GPU 支持
+    # GPU 支持（可选，注释后使用 CPU）
     deploy:
       resources:
         reservations:
@@ -19,38 +20,39 @@ services:
 
     # 环境变量
     environment:
-      - DISPLAY=${DISPLAY}
+      - DISPLAY=${DISPLAY:-host.docker.internal:0}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
+      - QT_QPA_PLATFORM_PLUGIN_PATH=/usr/local/lib/python3.10/dist-packages/PyQt5/Qt5/plugins/platforms
 
     # 挂载卷
     volumes:
-      # X11 socket（GUI 显示）
+      # X11 socket（Linux GUI 显示）
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # 数据持久化
       - ./data:/app/data
       # 模型文件
       - ./models:/app/models
-      # 视频文件（可选）
-      - ./videos:/app/videos
+      # 配置文件
+      - ./config:/app/config
+      # 视频文件（可选，用于测试）
+      - ./videos:/app/videos:ro
 
-    # 网络模式
+    # 网络和设备
     network_mode: host
-
-    # 设备访问
     devices:
-      # 摄像头
-      - /dev/video0:/dev/video0
+      - /dev/video0:/dev/video0  # 摄像头（可选）
 
-    # 权限
+    # 权限设置
     privileged: true
-
-    # 交互模式
     stdin_open: true
     tty: true
 
-  # 仅命令行模式（无 GUI）
+    # 默认命令（启动 GUI）
+    command: ["python3", "main.py", "--gui"]
+
+  # 命令行模式服务（无 GUI，适合服务器部署）
   traffic-analysis-cli:
     build:
       context: .
@@ -69,13 +71,76 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
 
     volumes:
       - ./data:/app/data
       - ./models:/app/models
-      - ./videos:/app/videos
+      - ./config:/app/config
+      - ./videos:/app/videos:ro
 
-    command: ["python3", "main.py", "--source", "/app/videos/test.mp4", "--headless"]
+    # 可通过 .env 文件自定义视频源和输出
+    command: >
+      python3 main.py
+      --source ${VIDEO_SOURCE:-/app/videos/test.mp4}
+      --output ${VIDEO_OUTPUT:-/app/data/output.mp4}
+      --device ${DEVICE:-cuda}
+      --headless
 
     profiles:
       - cli
+
+  # 批量检测服务（运行 batch_detect.py）
+  traffic-analysis-batch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-analysis:latest
+    container_name: traffic-analysis-batch
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./videos:/app/videos:ro
+
+    command: >
+      python3 scripts/batch_detect.py
+      -i ${INPUT_DIR:-/app/videos}
+      -o ${OUTPUT_DIR:-/app/data/output}
+      -n ${SKIP_FRAMES:-10}
+
+    profiles:
+      - batch
+
+  # 模型下载服务（首次使用）
+  traffic-analysis-download:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traffic-analysis:latest
+    container_name: traffic-analysis-download
+
+    volumes:
+      - ./models:/app/models
+
+    command: ["python3", "scripts/download_models.py"]
+
+    profiles:
+      - download
+
+# 可选：网络配置（如需隔离）
+# networks:
+#   traffic-net:
+#     driver: bridge
