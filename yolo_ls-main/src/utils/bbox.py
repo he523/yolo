@@ -36,38 +36,6 @@ def clamp_bbox(
     return x1, y1, x2, y2
 
 
-def clamp_bbox_array(
-    xyxy: np.ndarray,
-    frame_w: int,
-    frame_h: int,
-) -> Tuple[int, int, int, int]:
-    """从浮点数组裁剪为整数 bbox。"""
-    x1, y1, x2, y2 = (int(round(v)) for v in xyxy[:4])
-    clamped = clamp_bbox((x1, y1, x2, y2), frame_w, frame_h)
-    if clamped is None:
-        return 0, 0, 0, 0
-    return clamped
-
-
-def iou_xyxy(a: _BBox, b: _BBox) -> float:
-    """计算两个 xyxy 边界框的 IOU。"""
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    iw = max(0, inter_x2 - inter_x1)
-    ih = max(0, inter_y2 - inter_y1)
-    inter = iw * ih
-    if inter <= 0:
-        return 0.0
-    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-    union = area_a + area_b - inter + 1e-6
-    return float(inter / union)
-
-
 def iou_xyxy_batch(a: _BBox, boxes: np.ndarray) -> np.ndarray:
     """
     计算框 a 与 boxes 中每一行的 IOU。

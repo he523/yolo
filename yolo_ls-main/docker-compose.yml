@@ -39,13 +39,13 @@ services:
       # 视频文件（可选，用于测试）
       - ./videos:/app/videos:ro
 
-    # 网络和设备
-    network_mode: host
+    # 网络模式（默认桥接；若需访问宿主机摄像头可取消注释 network_mode: host）
+    # network_mode: host
     devices:
       - /dev/video0:/dev/video0  # 摄像头（可选）
 
-    # 权限设置
-    privileged: true
+    # 权限：非特权模式；若摄像头访问异常可取消注释 privileged: true
+    # privileged: true
     stdin_open: true
     tty: true
 

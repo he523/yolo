@@ -42,9 +42,10 @@ WORKDIR /app
 # 复制依赖文件
 COPY requirements.txt .
 
-# 安装 Python 依赖（使用国内镜像加速）
-RUN pip3 install --no-cache-dir --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip3 install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+# 安装 Python 依赖（通过 PIP_INDEX 指定镜像；国内用户可用 --build-arg PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple）
+ARG PIP_INDEX=https://pypi.org/simple
+RUN pip3 install --no-cache-dir --upgrade pip -i ${PIP_INDEX} && \
+    pip3 install --no-cache-dir -r requirements.txt -i ${PIP_INDEX} && \
     rm -rf /usr/local/lib/python3.10/dist-packages/cv2/qt
 
 # 复制项目文件

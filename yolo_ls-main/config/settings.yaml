@@ -1,119 +1,179 @@
-# 系统配置
-system:
-  device: "cuda"  # cuda 或 cpu
-  log_level: "INFO"
+# =============================================================================
+#  实时交通分析系统 — 全局配置文件
+#  修改后点击 GUI 中「重新加载 settings.yaml」即时生效（无需重启）
+# =============================================================================
 
-# 性能优化（FPS 监控 + 自适应降级）
+# ---------------------------------------------------------------------------
+#  系统基础设置
+# ---------------------------------------------------------------------------
+system:
+  device: cuda            # 推理设备: cuda (NVIDIA GPU) | cpu
+  log_level: INFO         # 日志级别: DEBUG | INFO | WARNING | ERROR
+
+# ---------------------------------------------------------------------------
+#  自适应性能优化（FPS 监控 + 自动降级）
+# ---------------------------------------------------------------------------
 performance:
   enabled: true
-  target_fps: 15
-  warmup_frames: 45          # 启动/OCR 加载阶段不触发降级
-  low_fps_checks: 5          # 连续 N 次低于阈值才升一级（避免连跳 L1→L3）
-  dynamic_resolution: true   # 负载高时自动降低 detector.imgsz
-  frame_skip: 1            # 降级时可达 2~3（跳帧处理）
-  onnx_runtime: false      # 预留：导出 ONNX 后用 onnxruntime 推理
-  tensorrt: false          # 预留：TensorRT 加速（需额外导出与依赖）
+  target_fps: 15.0
+  warmup_frames: 45       # 启动 / OCR 加载阶段的预热帧数（不触发降级）
+  low_fps_checks: 5       # 连续 N 帧低于目标才升一级（避免频繁跳变）
+  dynamic_resolution: true # 负载高时自动降低 detector.imgsz
+  frame_skip: 1           # 降级阶段的跳帧倍数（1=不跳, 2=隔帧处理）
+  onnx_runtime: false     # [预留] ONNX Runtime 推理加速
+  tensorrt: false         # [预留] TensorRT 推理加速
 
-# 视频输入配置
+# ---------------------------------------------------------------------------
+#  视频输入
+# ---------------------------------------------------------------------------
 video:
-  source: "0"  # 摄像头ID、RTSP地址或视频文件路径
-  fps: 15
-  width: 1280
-  height: 720
-  resize: [640, 640]
+  source: '0'             # 视频源: '0'=默认摄像头 | RTSP 地址 | 视频文件路径
+  fps: 15                 # 处理目标帧率
+  width: 1280             # 摄像头采集宽度
+  height: 720             # 摄像头采集高度
+  # resize:               # 注释掉 = 保持原始分辨率，不压缩画质
+  # - 640
+  # - 640
 
-# YOLO 检测配置
+# ---------------------------------------------------------------------------
+#  YOLO 检测器
+# ---------------------------------------------------------------------------
 detector:
-  model_path: "models/yolo12n_vehicle.pt"  # 训练后的车辆检测模型
-  confidence: 0.2
-  iou_threshold: 0.45
-  # 远处小目标增强：更高推理分辨率 + 自适应切片兜底
-  imgsz: 640           # 实时优先建议 640/768；越大越准但更慢
-  max_det: 300
-  enable_tiling: false # 切片会明显变慢；需要远处小车更准再打开
-  tiling_mode: strip   # strip=仅上半幅(快) / full=完整网格(慢)
-  tiling_interval: 5   # 切片兜底最少间隔帧数
-  tiling_grid: [2, 2]
-  tiling_overlap: 0.20
-  tiling_min_dets: 10
-  fallback_model: yolo12n.pt  # 自定义权重缺失时使用
-  # 性能优化：上下文检测会额外跑检测（人/信号灯），实时场景建议关闭
-  enable_context_detection: false
-  classes: [0, 1, 2, 3, 5]  # 3wheeler, bike, bus, car, truck (排除 person)
-  device: "cuda"
+  model_path: models/yolo12n_vehicle.pt  # YOLO 模型权重路径
+  confidence: 0.4
+  iou_threshold: 0.45     # NMS 的 IoU 阈值 (0~1)
+  imgsz: 640              # YOLO 推理输入尺寸（像素），越大越准但越慢
+  max_det: 300            # 单帧最大检测目标数
+  enable_tiling: false
+  tiling_mode: strip      # 切片模式: strip=仅上半幅2块(快) | full=完整网格(慢)
+  tiling_interval: 5      # 切片兜底最少间隔帧数
+  tiling_grid:            # 切片网格行列数（仅 full 模式生效）
+  - 2
+  - 2
+  tiling_overlap: 0.2     # 切片重叠比例 (0~0.45)
+  tiling_min_dets: 10     # 常规检测结果 < 此值时触发切片兜底
+  enable_context_detection: true   # 上下文检测（人/交通灯），闯红灯检测依赖此项
+  classes:                # 要检测的 COCO 类别 ID
+  - 0   # person
+  - 1   # bicycle
+  - 2   # car
+  - 3   # motorcycle
+  - 5   # bus
 
-# ByteTrack 跟踪配置
+# ---------------------------------------------------------------------------
+#  ByteTrack 多目标跟踪
+# ---------------------------------------------------------------------------
 tracker:
-  track_thresh: 0.5
-  track_buffer: 30
-  match_thresh: 0.8
-  min_box_area: 10
+  track_thresh: 0.5       # 高置信度检测阈值，≥此值的检测优先匹配
+  track_buffer: 30        # 丢失跟踪的最大保留帧数
+  match_thresh: 0.8       # 高置信度检测与跟踪器的 IoU 匹配阈值
+  min_box_area: 10        # 最小检测框面积（像素），过小忽略
 
-# 特征分析配置
+# ---------------------------------------------------------------------------
+#  车辆特征提取
+# ---------------------------------------------------------------------------
 feature:
-  speed_threshold: 60  # km/h 超速阈值
-  pixel_to_meter: 0.05  # 像素到米的转换系数（需标定）
-  fps: 15
+  pixel_to_meter: 0.05    # 像素到米的转换系数（需根据场景标定）
 
-# 违规检测配置
+# ---------------------------------------------------------------------------
+#  违规检测
+# ---------------------------------------------------------------------------
 violation:
-  red_light_enabled: true
-  speeding_enabled: true
+  red_light_enabled: true   # 是否启用闯红灯检测（需配置停止线）
+  speeding_enabled: true    # 是否启用超速检测
   wrong_way_enabled: true
   illegal_lane_enabled: true
-  expected_flow_direction: north  # 合法车流主方向 north/south/east/west 等
-  lane_change_lateral_px: 80
-  lane_change_min_speed_kmh: 15
-  speed_limit: 60  # km/h
+  expected_flow_direction: north
+  lane_change_lateral_px: 80     # 变道判定横向位移阈值（像素）
+  lane_change_min_speed_kmh: 15  # 变道最低速度（低于此值不算变道）
+  speed_limit: 60
   emergency_distance: 300
-  snapshot_dir: data/snapshots
-  # 默认停止线大致位置（以 1280x720 场景为例，可根据实际画面调整）
+  snapshot_dir: data/snapshots  # 违规截图保存目录
   stop_line:
-    y: 430
-    x_start: 200
-    x_end: 1100
+    y: 519
+    x_start: 0
+    x_end: 1919
 
-# OCR 配置
+# ---------------------------------------------------------------------------
+#  交通灯状态检测（HSV 参数可按部署场景调优）
+# ---------------------------------------------------------------------------
+traffic_light:
+  # HSV 检测参数（色调 H / 饱和度 S / 明度 V）
+  red_hue_low1: 0
+  red_hue_high1: 10
+  red_hue_low2: 160
+  red_hue_high2: 180
+  red_sat_low: 60
+  red_val_low: 60
+  green_hue_low: 45
+  green_hue_high: 85
+  green_sat_low: 60
+  green_val_low: 60
+  yellow_hue_low: 15
+  yellow_hue_high: 40
+  yellow_sat_low: 60
+  yellow_val_low: 60
+  # 颜色判定阈值（目标颜色像素占总 ROI 比例低于此值视为 unknown）
+  color_threshold: 0.06
+  # 竖灯宽高比范围（width/height）
+  vertical_aspect_min: 0.25
+  vertical_aspect_max: 0.55
+  # 故障检测参数
+  malfunction_window: 10     # 滑动窗口帧数
+  malfunction_unknown_ratio: 0.8  # unknown 占比 ≥ 此值触发故障
+  malfunction_change_count: 6     # 窗口内状态变化 ≥ 此值触发故障
+
+# ---------------------------------------------------------------------------
+#  车牌识别 (OCR)
+# ---------------------------------------------------------------------------
 ocr:
-  model_path: "models/plate_ocr.pt"  # CRNN 车牌识别模型
-  use_gpu: true
-  enabled: true           # 关闭可跳过 PaddleOCR，显著减轻启动负担
-  paddle_mobile: true     # 使用 PP-OCRv4 mobile，避免 server 大模型
+  model_path: models/plate_ocr.pt  # CRNN 车牌识别模型路径
+  use_gpu: true           # 是否使用 GPU 推理
+  enabled: true
+  paddle_mobile: true     # 使用 PP-OCRv4 mobile 模型（false=server 大模型）
   interval: 10            # 每 N 帧识别一次（调度器优先未识别车辆）
-  min_bbox_height: 40     # 车辆框高度小于该值时跳过（远处太小基本识别不到）
-  max_vehicles_per_frame: 5  # 每次最多识别几辆车，避免卡顿
+  min_bbox_height: 40     # 车辆框高度 < 此值时跳过（远处太小识别不到）
+  max_vehicles_per_frame: 5  # 每帧最多识别几辆车，避免卡顿
 
-# 数据库配置
+# ---------------------------------------------------------------------------
+#  数据库
+# ---------------------------------------------------------------------------
 database:
-  path: "data/traffic.db"
-  pool_size: 5             # SQLite 连接池大小（>1 启用）
-  retention_days: 30
-  max_rows_per_table: 50000
-  max_size_mb: 512
-  cleanup_enabled: true
-  cleanup_interval_hours: 24
+  path: data/traffic.db   # SQLite 数据库文件路径
+  pool_size: 5            # 连接池大小（>1 启用）
+  retention_days: 30      # 数据保留天数，超过自动清理
+  max_rows_per_table: 50000  # 单表最大行数
+  max_size_mb: 512        # 数据库文件最大大小 (MB)
+  cleanup_enabled: true   # 是否启用自动清理
+  cleanup_interval_hours: 24  # 自动清理间隔（小时）
 
-# GUI 配置
+# ---------------------------------------------------------------------------
+#  GUI 界面
+# ---------------------------------------------------------------------------
 gui:
-  window_title: "实时交通分析系统"
-  window_size: [1400, 900]
-  theme: "dark"
-  language: zh_CN   # zh_CN | en
+  window_title: 实时交通分析系统  # 窗口标题
+  window_size:            # 窗口尺寸 (宽 × 高)
+  - 1400
+  - 900
+  theme: dark             # 主题: dark | light
+  language: zh_CN         # 界面语言: zh_CN (简体中文) | en (English)
 
-# 风险预测配置
+# ---------------------------------------------------------------------------
+#  碰撞风险预测 (ST-GAT)
+# ---------------------------------------------------------------------------
 risk:
   enabled: true
-  history_length: 10
-  prediction_horizon: 15
-  collision_threshold: 150.0
-  interaction_distance: 200
-  temporal_window: 10
-  interval: 3             # 每 N 帧计算一次风险（默认 3，降低卡顿）
+  history_length: 10      # 轨迹历史长度（帧数）
+  prediction_horizon: 15  # 预测视野（未来帧数）
+  collision_threshold: 150.0  # 碰撞判定距离阈值（像素）
+  interaction_distance: 200   # 交互图边距阈值（像素）
+  temporal_window: 10     # ST-GAT 时间窗口大小
+  interval: 3             # 每 N 帧计算一次风险（降低卡顿）
   max_tracks: 20          # 参与风险计算的最多车辆数（按框面积取前 N）
-  stgat_model_path: null      # 例如: experiments/stgat_xxx/best.pt
-  collision_model_path: null  # 例如: experiments/collision_predictor_xxx/best.pt
-  ttc_thresholds:
-    critical: 0.5
-    high: 1.0
-    medium: 2.0
-    low: 3.0
+  stgat_model_path: null  # ST-GAT 模型路径，null 则使用规则模式
+  collision_model_path: null  # 碰撞预测模型路径，null 则使用规则模式
+  ttc_thresholds:         # TTC (碰撞时间) 风险等级阈值（秒）
+    critical: 0.5         #   < 0.5s → 严重
+    high: 1.0             #   < 1.0s → 高
+    medium: 2.0           #   < 2.0s → 中
+    low: 3.0              #   < 3.0s → 低

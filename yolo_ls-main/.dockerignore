@@ -1,44 +1,67 @@
-# Git
-.git
-.gitignore
-
-# Python
-__pycache__
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-.venv/
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
 *.egg-info/
 dist/
 build/
+eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# OS
-.DS_Store
-Thumbs.db
+# 数据文件（通过 volume 挂载，不打包进镜像）
+data/
+*.db
+*.db-journal
+*.db-wal
 
-# Logs
-*.log
+# 模型文件（通过 volume 挂载或单独下载）
+models/*.pt
+models/*.onnx
+!models/.gitkeep
+
+# 测试视频文件
+videos/
+
+# 输出文件
+*.mp4
+*.avi
+output/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# 文档截图
+docs/**/*.png
+docs/**/*.jpg
+
+# 实验与日志
+experiments/
 logs/
+*.log
 
-# 临时文件
-*.tmp
-*.temp
+# macOS
+.DS_Store
 
-# 测试数据（太大）
-data/*.db
-videos/*.mp4
-videos/*.avi
-
-# 文档
-*.doc
-*.docx
-*.pdf
-README.md
+# Windows
+Thumbs.db

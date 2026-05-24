@@ -69,7 +69,7 @@ done
 # 运行容器
 if [ "$MODE" = "gui" ]; then
     echo -e "${GREEN}启动 GUI 模式...${NC}"
-    docker-compose up traffic-analysis
+    docker-compose up traffic-analysis-gui
 else
     echo -e "${GREEN}启动命令行模式...${NC}"
     if [ -n "$VIDEO_SOURCE" ]; then

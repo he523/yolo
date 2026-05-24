@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from collections import Counter
+from typing import Dict
 
 # 在导入任何Qt相关模块之前设置环境变量，避免OpenCV Qt插件冲突
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''  # 清除OpenCV的Qt路径
@@ -118,6 +119,7 @@ def run_cli(args):
     video = VideoStream(
         video_source,
         fps=video_cfg.get('fps', 15),
+        resize=tuple(video_cfg['resize']) if video_cfg.get('resize') else None,
     )
     model_mgr = ModelManager(config)
     model_path, _ = model_mgr.load_yolo_path(args.model or det_cfg.get('model_path'))
@@ -151,6 +153,7 @@ def run_cli(args):
         tiling_min_dets=det_cfg.get('tiling_min_dets', 10),
         tiling_interval=det_cfg.get('tiling_interval', 5),
         tiling_mode=det_cfg.get('tiling_mode', 'strip'),
+        vehicle_classes=det_cfg.get('classes'),
     )
     tracker = ByteTracker(
         track_thresh=tracker_cfg.get('track_thresh', 0.5),
@@ -166,11 +169,14 @@ def run_cli(args):
         speed_limit=vio_cfg.get('speed_limit', 60),
         snapshot_dir=vio_cfg.get('snapshot_dir', 'data/snapshots'),
         emergency_distance=vio_cfg.get('emergency_distance', 300),
+        red_light_enabled=vio_cfg.get('red_light_enabled', True),
+        speeding_enabled=vio_cfg.get('speeding_enabled', True),
         wrong_way_enabled=vio_cfg.get('wrong_way_enabled', True),
         illegal_lane_enabled=vio_cfg.get('illegal_lane_enabled', True),
         expected_flow_direction=vio_cfg.get('expected_flow_direction', 'south'),
         lane_change_lateral_px=vio_cfg.get('lane_change_lateral_px', 80),
         lane_change_min_speed_kmh=vio_cfg.get('lane_change_min_speed_kmh', 15),
+        traffic_light_config=config.get('traffic_light'),
     )
     # 如果在配置中预先定义了停止线，则启用闯红灯检测
     stop_line_cfg = vio_cfg.get('stop_line')
@@ -181,6 +187,8 @@ def run_cli(args):
                 x_start=int(stop_line_cfg.get('x_start', 0)),
                 x_end=int(stop_line_cfg.get('x_end', 0)),
             )
+            # 有停止线时必须检测交通灯状态，否则停止线始终显示为绿色
+            enable_context_detection = True
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("Invalid stop_line in config: %s", exc)
@@ -253,12 +261,14 @@ def run_cli(args):
     print("Press 'q' to quit")
 
     frame_count = 0
-    plate_cache = {}
+    plate_cache: Dict[int, str] = {}
+    _plate_cache_max = 2000  # 防止长期运行内存泄漏
     ocr_interval = int(ocr_cfg.get('interval', 15))
     ocr_min_h = int(ocr_cfg.get('min_bbox_height', 40))
     ocr_max_per_frame = int(ocr_cfg.get('max_vehicles_per_frame', 8))
     ocr_scheduler = OCRScheduler(max_per_frame=ocr_max_per_frame)
-    seen_tracks = set()
+    seen_tracks: set = set()
+    _seen_tracks_max = 10000  # 防止长期运行无限增长
     risk_level_counter = Counter()
     max_active_risks = 0
     video_fps = video.get_fps()
@@ -442,6 +452,14 @@ def run_cli(args):
                     nearby_emergency_vehicles=record.nearby_objects,
                 )
 
+        # 定期清理缓存，防止长期运行内存泄漏
+        if frame_count % 300 == 0:
+            current_track_ids = {t.track_id for t in tracks}
+            if len(seen_tracks) > _seen_tracks_max:
+                seen_tracks &= current_track_ids
+            if len(plate_cache) > _plate_cache_max:
+                plate_cache = {tid: plate_cache[tid] for tid in current_track_ids if tid in plate_cache}
+
         if frame_count % 30 == 0 and frame_tracks:
             avg_speed = sum(item['speed_kmh'] for item in frame_tracks) / len(frame_tracks)
             direction_counter = Counter(item['direction'] for item in frame_tracks)
@@ -600,7 +618,7 @@ def main():
         help='YOLOv12 model path'
     )
     parser.add_argument(
-        '--confidence', type=float, default=0.2,
+        '--confidence', type=float, default=0.3,
         help='检测置信度阈值'
     )
     parser.add_argument(

@@ -252,9 +252,9 @@ class PlateDetector:
             rect = cv2.boundingRect(cnt)
             rx, ry, rw, rh = rect
 
-            # 车牌宽高比约为 3:1 到 4:1
+            # 车牌宽高比约 2:1~6:1，尺寸下限放宽以适配远处小车牌
             aspect_ratio = rw / rh if rh > 0 else 0
-            if 2.5 < aspect_ratio < 5.0 and rw > 60 and rh > 15:
+            if 2.0 < aspect_ratio < 6.0 and rw > 40 and rh > 10:
                 area = rw * rh
                 if area > best_score:
                     best_score = area
@@ -600,23 +600,30 @@ class PlateOCR:
         Returns:
             清理后的车牌号或 None
         """
+        # 保留汉字、字母、数字，移除其他字符
         text = re.sub(r'[^\u4e00-\u9fa5A-Z0-9]', '', text.upper())
-        text = text.replace('O', '0').replace('I', '1')
+        text = text.replace('O', '0').replace('I', '1').replace('L', '1')
 
+        if len(text) < 5:
+            return None
+
+        # 标准中国大陆车牌：省份简称 + 字母 + 5~6 位字母数字
         pattern = r'^[\u4e00-\u9fa5][A-Z][A-Z0-9]{5,6}$'
         if re.match(pattern, text):
             return text
 
         if allow_loose:
+            # 放宽匹配：允许缺省份、长度 4~6 位字母数字、或含汉字超长文本
             if re.match(r'^[\u4e00-\u9fa5][A-Z][A-Z0-9]{4,6}$', text):
                 return text
-            # 省份汉字漏识别时，常见为 A12345 / 0A12345 等
             if re.match(r'^[A-Z][A-Z0-9]{4,6}$', text):
                 return text
-            if 5 <= len(text) <= 9:
-                if re.search(r'[A-Z]', text) and re.search(r'[0-9]', text):
-                    if re.search(r'[\u4e00-\u9fa5]', text):
-                        return text
+            # 至少包含字母和数字的任意 ≥5 字符文本（PaddleOCR 可能输出不完整）
+            if 5 <= len(text) <= 10:
+                has_letter = bool(re.search(r'[A-Z]', text))
+                has_digit = bool(re.search(r'[0-9]', text))
+                if has_letter or has_digit:
+                    return text
 
         return None
 

@@ -1,0 +1,18 @@
+# 锁定版本依赖（由审计修复生成）
+# 使用 `pip install -r requirements-lock.txt` 安装固定版本
+# 定期运行 `pip freeze > requirements-lock.txt` 更新
+torch==2.4.1
+torchvision==0.19.1
+ultralytics==8.3.0
+opencv-python==4.10.0.84
+numpy==1.26.4
+PyQt5==5.15.11
+matplotlib==3.9.2
+paddleocr==2.9.0
+paddlepaddle==3.0.0b2
+pyyaml==6.0.2
+lap==0.4.0
+scipy==1.14.1
+filterpy==1.4.5
+apscheduler==3.10.4
+pytest==8.3.3

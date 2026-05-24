@@ -171,16 +171,44 @@ class TrafficPoliceDetector:
 class TrafficLightDetector:
     """交通灯状态检测器"""
 
-    def __init__(self):
-        self.red_lower1 = np.array([0, 100, 100])
-        self.red_upper1 = np.array([10, 255, 255])
-        self.red_lower2 = np.array([160, 100, 100])
-        self.red_upper2 = np.array([180, 255, 255])
-        self.green_lower = np.array([35, 100, 100])
-        self.green_upper = np.array([85, 255, 255])
-        self.yellow_lower = np.array([15, 100, 100])
-        self.yellow_upper = np.array([35, 255, 255])
-        self.state_history = deque(maxlen=30)
+    def __init__(self, config: Optional[Dict] = None):
+        cfg = config or {}
+        # HSV 范围：可通过 YAML traffic_light 节覆盖
+        self.red_lower1 = np.array([
+            cfg.get('red_hue_low1', 0),
+            cfg.get('red_sat_low', 60),
+            cfg.get('red_val_low', 60),
+        ])
+        self.red_upper1 = np.array([cfg.get('red_hue_high1', 10), 255, 255])
+        self.red_lower2 = np.array([
+            cfg.get('red_hue_low2', 160),
+            cfg.get('red_sat_low', 60),
+            cfg.get('red_val_low', 60),
+        ])
+        self.red_upper2 = np.array([cfg.get('red_hue_high2', 180), 255, 255])
+        self.green_lower = np.array([
+            cfg.get('green_hue_low', 45),
+            cfg.get('green_sat_low', 60),
+            cfg.get('green_val_low', 60),
+        ])
+        self.green_upper = np.array([cfg.get('green_hue_high', 85), 255, 255])
+        self.yellow_lower = np.array([
+            cfg.get('yellow_hue_low', 15),
+            cfg.get('yellow_sat_low', 60),
+            cfg.get('yellow_val_low', 60),
+        ])
+        self.yellow_upper = np.array([cfg.get('yellow_hue_high', 40), 255, 255])
+        self.state_history = deque(maxlen=cfg.get('malfunction_window', 10) * 3)
+        self._color_threshold = cfg.get('color_threshold', TRAFFIC_LIGHT_COLOR_THRESHOLD)
+        self._malfunction_window = cfg.get('malfunction_window', 10)
+        self._malfunction_unknown_thresh = int(
+            self._malfunction_window * cfg.get('malfunction_unknown_ratio', 0.8)
+        )
+        self._malfunction_change_count = cfg.get('malfunction_change_count', 6)
+        # 故障判定消抖
+        self._malfunction_latch = 0         # 连续故障帧计数
+        self._malfunction_engaged = False   # 故障锁存
+        self._malfunction_clear_counter = 0 # 连续正常帧计数（锁存后）
 
     def detect_state(self, frame: np.ndarray,
                      bbox: Tuple[int, int, int, int]) -> str:
@@ -195,16 +223,30 @@ class TrafficLightDetector:
             return 'unknown'
 
         aspect = (x2 - x1) / max(1, (y2 - y1))
-        if not (TRAFFIC_LIGHT_MIN_ASPECT <= aspect <= TRAFFIC_LIGHT_MAX_ASPECT):
+        is_vertical = TRAFFIC_LIGHT_MIN_ASPECT <= aspect <= TRAFFIC_LIGHT_MAX_ASPECT
+        is_horizontal = (1.0 / TRAFFIC_LIGHT_MAX_ASPECT) <= aspect <= (1.0 / TRAFFIC_LIGHT_MIN_ASPECT)
+
+        if not (is_vertical or is_horizontal):
             return self._color_vote(roi)
 
         hsv = bgr_to_hsv_normalized(roi)
-        h = roi.shape[0]
-        bands = [
-            hsv[0: max(1, h // 3), :],
-            hsv[max(1, h // 3): max(2, 2 * h // 3), :],
-            hsv[max(2, 2 * h // 3):, :],
-        ]
+        if is_vertical:
+            # 竖灯：上红 / 中黄 / 下绿
+            h = roi.shape[0]
+            bands = [
+                hsv[0: max(1, h // 3), :],
+                hsv[max(1, h // 3): max(2, 2 * h // 3), :],
+                hsv[max(2, 2 * h // 3):, :],
+            ]
+        else:
+            # 横灯：左红 / 中黄 / 右绿
+            w = roi.shape[1]
+            bands = [
+                hsv[:, 0: max(1, w // 3)],
+                hsv[:, max(1, w // 3): max(2, 2 * w // 3)],
+                hsv[:, max(2, 2 * w // 3):],
+            ]
+
         band_states = []
         for band in bands:
             if band.size == 0:
@@ -236,7 +278,7 @@ class TrafficLightDetector:
             'yellow': np.sum(yellow_mask > 0) / total,
         }
         best = max(ratios, key=ratios.get)
-        if ratios[best] < TRAFFIC_LIGHT_COLOR_THRESHOLD:
+        if ratios[best] < self._color_threshold:
             return 'unknown'
         return best
 
@@ -258,23 +300,52 @@ class TrafficLightDetector:
             'yellow': np.sum(yellow_mask > 0) / total,
         }
         best = max(ratios, key=ratios.get)
-        if ratios[best] < TRAFFIC_LIGHT_COLOR_THRESHOLD:
+        if ratios[best] < self._color_threshold:
             return 'unknown'
-        self.state_history.append(best)
+        # state_history 由外层 detect_state() 统一追加，避免重复计数
         return best
 
     def is_malfunctioning(self) -> bool:
-        """检测信号灯是否故障"""
-        if len(self.state_history) < 10:
+        """检测信号灯是否故障（带滞回消抖，避免短暂遮挡误触发）。"""
+        w = self._malfunction_window
+        if len(self.state_history) < w:
             return False
-        recent = list(self.state_history)[-10:]
+        recent = list(self.state_history)[-w:]
         unknown_count = recent.count('unknown')
-        if unknown_count >= 8:
-            return True
         changes = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
-        if changes >= 6:
-            return True
-        return False
+        raw_fault = (unknown_count >= self._malfunction_unknown_thresh) or (
+            changes >= self._malfunction_change_count
+        )
+
+        if self._malfunction_engaged:
+            # 已锁存：需连续 5 帧正常才解除
+            if raw_fault:
+                self._malfunction_clear_counter = 0
+            else:
+                self._malfunction_clear_counter += 1
+                if self._malfunction_clear_counter >= 5:
+                    self._malfunction_engaged = False
+                    self._malfunction_latch = 0
+                    self._malfunction_clear_counter = 0
+            return self._malfunction_engaged
+        else:
+            # 未锁存：需连续 3 帧故障才触发
+            if raw_fault:
+                self._malfunction_latch += 1
+                if self._malfunction_latch >= 3:
+                    self._malfunction_engaged = True
+                    self._malfunction_clear_counter = 0
+                    return True
+            else:
+                self._malfunction_latch = max(0, self._malfunction_latch - 1)
+            return False
+
+    def reset_history(self) -> None:
+        """清空状态历史（摄像头移动 / 场景切换时调用）。"""
+        self.state_history.clear()
+        self._malfunction_latch = 0
+        self._malfunction_engaged = False
+        self._malfunction_clear_counter = 0
 
 
 class StopLine:
@@ -310,15 +381,20 @@ class AdaptiveViolationDetector:
                  stop_line: Optional[StopLine] = None,
                  snapshot_dir: str = "data/snapshots",
                  emergency_distance: int = DEFAULT_EMERGENCY_DISTANCE_PX,
+                 red_light_enabled: bool = True,
+                 speeding_enabled: bool = True,
                  wrong_way_enabled: bool = True,
                  illegal_lane_enabled: bool = True,
                  expected_flow_direction: str = "south",
                  lane_change_lateral_px: int = DEFAULT_LANE_CHANGE_LATERAL_PX,
-                 lane_change_min_speed_kmh: float = DEFAULT_LANE_CHANGE_MIN_SPEED_KMH):
+                 lane_change_min_speed_kmh: float = DEFAULT_LANE_CHANGE_MIN_SPEED_KMH,
+                 traffic_light_config: Optional[Dict] = None):
         self.speed_limit = speed_limit
         self.stop_line = stop_line
         self.snapshot_dir = Path(snapshot_dir)
         self.emergency_distance = emergency_distance
+        self.red_light_enabled = red_light_enabled
+        self.speeding_enabled = speeding_enabled
         self.wrong_way_enabled = wrong_way_enabled
         self.illegal_lane_enabled = illegal_lane_enabled
         self.expected_flow_direction = expected_flow_direction.lower()
@@ -338,7 +414,7 @@ class AdaptiveViolationDetector:
         (self.snapshot_dir / "anomaly").mkdir(exist_ok=True)
 
         # 子模块
-        self.traffic_light_detector = TrafficLightDetector()
+        self.traffic_light_detector = TrafficLightDetector(traffic_light_config)
         self.emergency_detector = EmergencyVehicleDetector()
         self.police_detector = TrafficPoliceDetector()
 
@@ -404,12 +480,13 @@ class AdaptiveViolationDetector:
         violation_type = None
         violation_speed = None
 
-        if speed > self.speed_limit:
+        if self.speeding_enabled and speed > self.speed_limit:
             if ViolationType.SPEEDING not in self.recorded_violations[track_id]:
                 violation_type = ViolationType.SPEEDING
                 violation_speed = speed
 
-        if (violation_type is None and
+        if (self.red_light_enabled and
+            violation_type is None and
             self.stop_line and
             len(history) > 0 and
             self.current_light_state == 'red'):
@@ -593,17 +670,27 @@ class AdaptiveViolationDetector:
 
         # 绘制停止线
         if self.stop_line:
-            color = (0, 0, 255) if self.current_light_state == 'red' else (0, 255, 0)
+            if self.current_light_state == 'red':
+                color = (0, 0, 255)      # 红灯 → 红线
+            elif self.current_light_state == 'green':
+                color = (0, 255, 0)      # 绿灯 → 绿线
+            elif self.current_light_state == 'yellow':
+                color = (0, 255, 255)    # 黄灯 → 黄线
+            else:
+                color = (0, 200, 255)    # 未知 → 橙线（非绿色，避免误导）
             cv2.line(annotated,
                      (self.stop_line.x_start, self.stop_line.y),
                      (self.stop_line.x_end, self.stop_line.y),
                      color, 2)
 
-        # 绘制交通灯状态
+        # 绘制交通灯状态（圆点 + 文字标签）
         light_colors = {'red': (0, 0, 255), 'green': (0, 255, 0),
-                        'yellow': (0, 255, 255), 'unknown': (128, 128, 128)}
+                        'yellow': (0, 255, 255), 'unknown': (0, 140, 255)}
         cv2.circle(annotated, (30, 60), 15,
                    light_colors.get(self.current_light_state, (128, 128, 128)), -1)
+        state_text = self.current_light_state.upper() if self.current_light_state != 'unknown' else '?'
+        cv2.putText(annotated, f"TL:{state_text}", (55, 66),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # 标注特种车辆
         for ev in self.current_emergency_vehicles:

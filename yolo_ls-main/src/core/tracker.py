@@ -56,8 +56,8 @@ class KalmanBoxTracker:
             [0, 0, 0, 1, 0, 0, 0]
         ])
         self.kf.R[2:, 2:] *= 10.
-        self.kf.P[4:, 4:] *= 1000.
-        self.kf.P *= 10.
+        self.kf.P[4:, 4:] *= 500.
+        self.kf.P *= 5.
         self.kf.Q[-1, -1] *= 0.01
         self.kf.Q[4:, 4:] *= 0.01
 
@@ -242,7 +242,7 @@ class ByteTracker:
         # 生成输出
         tracks = []
         for trk in self.trackers:
-            if trk.time_since_update == 0 and trk.hits >= 3:
+            if trk.time_since_update == 0 and trk.hits >= 5:
                 info = self.track_info.get(trk.id, {})
                 track = Track(
                     track_id=trk.id,

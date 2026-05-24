@@ -27,7 +27,7 @@ DEFAULT_CONFIG: ConfigDict = {
     },
     "video": {"source": "0", "fps": 15, "width": 1280, "height": 720},
     "detector": {
-        "confidence": 0.2,
+        "confidence": 0.3,
         "iou_threshold": 0.45,
         "imgsz": 768,
         "max_det": 300,
@@ -60,7 +60,7 @@ DEFAULT_CONFIG: ConfigDict = {
 }
 
 _KNOWN_TOP_LEVEL = frozenset(DEFAULT_CONFIG) | frozenset(
-    {"gui", "violation", "ocr", "database", "risk", "feature"}
+    {"gui", "violation", "ocr", "database", "risk", "feature", "traffic_light"}
 )
 
 
@@ -317,7 +317,7 @@ def validate_config(cfg: Optional[ConfigDict], *, strict_unknown: bool = False) 
         risk.get("ttc_thresholds"), "risk.ttc_thresholds"
     )
 
-    for section in ("gui",):
+    for section in ("gui", "traffic_light"):
         if section in merged:
             sec = merged[section]
             if sec is not None and not isinstance(sec, dict):

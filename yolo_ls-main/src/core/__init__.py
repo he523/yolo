@@ -2,7 +2,7 @@
 from .detector import VehicleDetector, Detection
 from .tracker import ByteTracker, Track
 from .feature import FeatureExtractor, VehicleFeatures, Direction, ColorAnalyzer, SpeedCalculator
-from .violation import ViolationDetector, Violation, ViolationType, StopLine
+# ViolationDetector / StopLine 已迁移至 adaptive_violation.py（旧 violation.py 已删除）
 from .lane_violation import (
     LaneViolationAnalyzer,
     LaneViolationResult,
@@ -22,7 +22,7 @@ __all__ = [
     'VehicleDetector', 'Detection',
     'ByteTracker', 'Track',
     'FeatureExtractor', 'VehicleFeatures', 'Direction', 'ColorAnalyzer', 'SpeedCalculator',
-    'ViolationDetector', 'Violation', 'ViolationType', 'StopLine',
+    # 'ViolationDetector', 'Violation', 'ViolationType', 'StopLine',  — 已删除
     'LaneViolationAnalyzer', 'LaneViolationResult', 'WrongWayConfig',
     'IllegalLaneChangeConfig', 'build_analyzer_from_violation_config',
     'EmergencyVehicleDetector', 'EmergencyVehicle', 'EmergencyVehicleType',

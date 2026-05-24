@@ -69,6 +69,7 @@ class Database:
         if pool_size > 1:
             self._pool = _SQLiteConnectionPool(self.db_path, pool_size=pool_size)
 
+        self._actual_path = self.db_path  # 记录实际使用的路径
         try:
             self._init_tables()
         except sqlite3.OperationalError as exc:
@@ -78,6 +79,13 @@ class Database:
             fallback = Path('/tmp/traffic.db')
             fallback.parent.mkdir(parents=True, exist_ok=True)
             self.db_path = fallback
+            self._actual_path = fallback
+            logger.warning(
+                "Database at %s is read-only; falling back to %s. "
+                "Data WILL BE LOST on container restart! "
+                "Fix permissions on the original path or mount a writable volume.",
+                str(db_path), str(fallback),
+            )
             self._init_tables()
 
     def _open_connection(self) -> sqlite3.Connection:

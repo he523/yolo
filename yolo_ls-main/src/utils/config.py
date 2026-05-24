@@ -57,6 +57,75 @@ def load_config(
     return _config
 
 
+def save_config_section(
+    config_path: str,
+    section: str,
+    key: str,
+    value: Any,
+) -> bool:
+    """
+    将嵌套配置项写回 YAML 文件，通过文本替换**完整保留注释和格式**。
+
+    Args:
+        config_path: YAML 文件路径
+        section: 顶层键名，如 ``"violation"``
+        key: 二级键名，如 ``"stop_line"``
+        value: 要写入的值（dict/list/scalar）
+
+    Returns:
+        是否成功写入
+    """
+    import re as _re
+    path = Path(config_path)
+    if not path.exists():
+        logger.warning("Config file not found: %s", path)
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        # 找出 key 在文件中的缩进深度（先于 value_block 生成）
+        key_pattern = _re.compile(
+            r"^([ \t]+)" + _re.escape(key) + r":",
+            _re.MULTILINE,
+        )
+        km = key_pattern.search(text)
+        if km is None:
+            logger.warning("Key %s.%s not found in %s", section, key, path)
+            return False
+        base_indent = km.group(1)           # key 自身的缩进
+
+        # 生成值的 YAML 表示，缩进与文件中 key 对齐
+        value_lines = yaml.dump(
+            {key: value},
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ).rstrip("\n")
+        value_block = "\n".join(
+            base_indent + line for line in value_lines.split("\n")
+        )
+        min_sub = len(base_indent) + 1      # 子行至少比 key 多 1 空格
+
+        # 匹配 key: 行及其所有更深缩进的子行
+        block_re = _re.compile(
+            _re.escape(base_indent + key) + r":.*"
+            r"(?:\n[ \t]{" + str(min_sub) + r",}.*)*",
+        )
+
+        new_text, count = _re.subn(block_re, value_block, text)
+        if count == 0:
+            logger.warning("Key %s.%s not found in %s", section, key, path)
+            return False
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        return True
+    except Exception:
+        logger.exception("Failed to save %s.%s to %s", section, key, path)
+        return False
+
+
 def get_config(key: Optional[str] = None) -> Any:
     """获取配置项；支持点分路径，如 ``video.fps``。"""
     if not _config:

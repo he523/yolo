@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QTableWidget,
     QTableWidgetItem, QTabWidget, QGroupBox, QLineEdit,
     QComboBox, QSpinBox, QStatusBar, QSplitter, QMessageBox,
-    QCheckBox, QFrame
+    QCheckBox, QFrame, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QImage, QPixmap, QColor, QFont
@@ -44,7 +44,7 @@ from src.ocr import PlateReader
 from src.ocr.ocr_scheduler import OCRScheduler
 from src.database import Database
 from src.database.scheduler import start_db_cleanup_from_config
-from src.utils.config import load_config
+from src.utils.config import load_config, save_config_section
 from src.utils.model_manager import ModelManager
 from src.utils.performance import PerformanceOptimizer, FPSMonitor
 from src.utils.stop_line_detect import detect_stop_line
@@ -211,6 +211,7 @@ class VideoThread(QThread):
         self.source = source
         self.config = config
         self.running = False
+        self._paused = False
 
         self.video_stream: Optional[VideoStream] = None
         self.detector: Optional[VehicleDetector] = None
@@ -299,7 +300,8 @@ class VideoThread(QThread):
         try:
             self.video_stream = VideoStream(
                 self.source,
-                fps=self.config.get('fps', 15)
+                fps=self.config.get('fps', 15),
+                resize=tuple(self.config['resize']) if self.config.get('resize') else None,
             )
             if not self.video_stream.open():
                 lang = self.config.get("gui_language", "zh_CN")
@@ -336,7 +338,7 @@ class VideoThread(QThread):
 
             self.detector = VehicleDetector(
                 model_path=yolo_path,
-                confidence=self.config.get('confidence', 0.5),
+                confidence=self.config.get('confidence', 0.3),
                 iou_threshold=self.config.get('iou_threshold', 0.45),
                 device=self.config.get('device', 'cpu'),
                 imgsz=self.config.get('imgsz', 768),
@@ -347,6 +349,7 @@ class VideoThread(QThread):
                 tiling_min_dets=self.config.get('tiling_min_dets', 10),
                 tiling_interval=self.config.get('tiling_interval', 5),
                 tiling_mode=self.config.get('tiling_mode', 'strip'),
+                vehicle_classes=self.config.get('vehicle_classes'),
             )
 
             self.tracker = ByteTracker(
@@ -365,11 +368,14 @@ class VideoThread(QThread):
                 speed_limit=self.config.get('speed_limit', 60),
                 snapshot_dir=self.config.get('snapshot_dir', 'data/snapshots'),
                 emergency_distance=self.config.get('emergency_distance', 300),
+                red_light_enabled=self.config.get('red_light_enabled', True),
+                speeding_enabled=self.config.get('speeding_enabled', True),
                 wrong_way_enabled=self.config.get('wrong_way_enabled', True),
                 illegal_lane_enabled=self.config.get('illegal_lane_enabled', True),
                 expected_flow_direction=self.config.get('expected_flow_direction', 'south'),
                 lane_change_lateral_px=self.config.get('lane_change_lateral_px', 80),
                 lane_change_min_speed_kmh=self.config.get('lane_change_min_speed_kmh', 15),
+                traffic_light_config=self.config.get('traffic_light_config'),
             )
 
             self.interaction_graph = None
@@ -423,6 +429,12 @@ class VideoThread(QThread):
                 fps_monitor.mark_ready()
 
             while self.running:
+                # 暂停时休眠，保持线程存活
+                while self._paused and self.running:
+                    self.msleep(100)
+                if not self.running:
+                    break
+
                 perf_enabled = self._runtime_perf_enabled
                 perf = self._perf_optimizer
                 fps_monitor = self._fps_monitor
@@ -460,7 +472,11 @@ class VideoThread(QThread):
                 )
 
                 # ===== 1) 检测：单次推理为主，避免每帧多次 predict 导致卡顿 =====
-                enable_context = bool(self.config.get('enable_context_detection', False))
+                # 有停止线时必须检测交通灯状态，否则停止线始终显示为绿色
+                enable_context = bool(
+                    self.config.get('enable_context_detection', False)
+                    or self.config.get('stop_line')
+                )
                 if enable_context:
                     # 车辆 + 人 + 信号灯一次性检测（比三次 predict 快很多）
                     all_classes = list(self.detector.VEHICLE_CLASSES.keys()) + [
@@ -622,10 +638,20 @@ class VideoThread(QThread):
             if self.video_stream is not None:
                 self.video_stream.release()
 
+    def pause(self):
+        """Pause processing (keep thread alive)."""
+        self._paused = True
+
+    def resume(self):
+        """Resume processing after pause."""
+        self._paused = False
+
     def stop(self):
         """Stop processing"""
         self.running = False
-        self.wait()
+        if not self.wait(3000):
+            self.terminate()
+            self.wait(1000)
 
 
 class MainWindow(QMainWindow):
@@ -648,7 +674,13 @@ class MainWindow(QMainWindow):
         self._violation_cache: deque[ViolationRecord] = deque(maxlen=500)
         self._max_violation_rows = 200
         self._is_processing = False
+        self._is_paused = False
         self._suppress_settings_apply = False
+        # 防抖定时器：GUI 设置变更后 500ms 自动持久化到 settings.yaml
+        self._settings_save_timer = QTimer(self)
+        self._settings_save_timer.setSingleShot(True)
+        self._settings_save_timer.setInterval(500)
+        self._settings_save_timer.timeout.connect(self._persist_settings_to_yaml)
 
         self.config = {
             'fps': 15,
@@ -746,6 +778,7 @@ class MainWindow(QMainWindow):
         tracker = cfg.get('tracker', {})
         feature = cfg.get('feature', {})
         gui = cfg.get('gui', {})
+        tl = cfg.get('traffic_light', {})
         self.config.update({
             'fps': video.get('fps', self.config['fps']),
             'model_path': det.get('model_path', self.config['model_path']),
@@ -758,6 +791,10 @@ class MainWindow(QMainWindow):
             'tiling_mode': det.get('tiling_mode', self.config.get('tiling_mode', 'strip')),
             'tiling_interval': det.get('tiling_interval', self.config.get('tiling_interval', 5)),
             'enable_context_detection': det.get('enable_context_detection', False),
+            'vehicle_classes': det.get('classes'),
+            'resize': video.get('resize'),
+            'red_light_enabled': vio.get('red_light_enabled', True),
+            'speeding_enabled': vio.get('speeding_enabled', True),
             'speed_limit': vio.get('speed_limit', self.config['speed_limit']),
             'emergency_distance': vio.get('emergency_distance', self.config['emergency_distance']),
             'snapshot_dir': vio.get('snapshot_dir', self.config['snapshot_dir']),
@@ -815,6 +852,7 @@ class MainWindow(QMainWindow):
             'database_path': db.get('path', self.config.get('database_path', 'data/traffic.db')),
             'database_pool_size': db.get('pool_size', self.config.get('database_pool_size', 5)),
             'gui_language': gui.get('language', self.config.get('gui_language', 'zh_CN')),
+            'traffic_light_config': tl,
         })
 
     def _apply_config_to_controls(self):
@@ -905,6 +943,33 @@ class MainWindow(QMainWindow):
         elif self._is_processing:
             self.statusBar.showMessage(self._tr.tr("status_settings_saved"), 2000)
 
+        # 防抖持久化：500ms 内无新变更则自动写入 settings.yaml
+        self._settings_save_timer.start()
+
+    def _persist_settings_to_yaml(self) -> None:
+        """将当前设置面板的值批量写入 settings.yaml（防抖回调）。"""
+        s = self._collect_detection_settings_from_ui()
+        config_path = 'config/settings.yaml'
+
+        # 映射: (section, key) -> 从 s 中取值的键
+        key_map = [
+            ('detector',   'confidence',            s['confidence']),
+            ('detector',   'enable_tiling',         s['enable_tiling']),
+            ('violation',  'speed_limit',           s['speed_limit']),
+            ('violation',  'emergency_distance',     s['emergency_distance']),
+            ('violation',  'expected_flow_direction', s['expected_flow_direction']),
+            ('violation',  'wrong_way_enabled',     s['wrong_way_enabled']),
+            ('violation',  'illegal_lane_enabled',  s['illegal_lane_enabled']),
+            ('violation',  'stop_line',             s['stop_line']),
+            ('performance','enabled',               s['performance_enabled']),
+            ('performance','target_fps',            s['performance_target_fps']),
+        ]
+
+        for section, key, value in key_map:
+            if value is None:
+                continue
+            save_config_section(config_path, section, key, value)
+
     def _apply_global_style(self):
         """应用全局深色主题（见 src/gui/theme.py）。"""
         palette = self.palette()
@@ -942,6 +1007,7 @@ class MainWindow(QMainWindow):
         self._tr.set_language(lang)
         self.config["gui_language"] = lang
         self._retranslate_ui()
+        self._sync_controls_for_state()
         self._set_live_badge(self._is_processing)
         if self._last_stats:
             self._on_stats_updated(self._last_stats)
@@ -1050,11 +1116,14 @@ class MainWindow(QMainWindow):
         video_frame = QFrame()
         video_frame.setObjectName("VideoPanel")
         video_frame_layout = QVBoxLayout(video_frame)
-        video_frame_layout.setContentsMargins(4, 4, 4, 4)
+        video_frame_layout.setContentsMargins(0, 0, 0, 0)
 
         self.video_label = QLabel()
         self.video_label.setObjectName("VideoPlaceholder")
-        self.video_label.setMinimumSize(920, 620)
+        self.video_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        self.video_label.setScaledContents(True)
         self.video_label.setAlignment(Qt.AlignCenter)
         video_frame_layout.addWidget(self.video_label)
         left_layout.addWidget(video_frame, stretch=1)
@@ -1076,7 +1145,7 @@ class MainWindow(QMainWindow):
 
         self.btn_open.clicked.connect(self._open_video)
         self.btn_camera.clicked.connect(self._open_camera)
-        self.btn_stop.clicked.connect(self._stop_video)
+        self.btn_stop.clicked.connect(self._toggle_pause)
 
         btn_layout.addWidget(self.btn_open, stretch=1)
         btn_layout.addWidget(self.btn_camera, stretch=1)
@@ -1398,8 +1467,6 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
         body_layout.addWidget(splitter)
         root_layout.addLayout(body_layout, stretch=1)
 
@@ -1417,6 +1484,8 @@ class MainWindow(QMainWindow):
             self.combo_language.blockSignals(False)
         self._apply_config_to_controls()
         self._retranslate_ui()
+        # 若视频正在运行，将重载的配置立即推送到检测管线
+        self._push_detection_settings_to_runtime()
 
     def _refresh_violation_labels(self) -> None:
         tr = self._tr
@@ -1474,6 +1543,9 @@ class MainWindow(QMainWindow):
         self._plate_cache = {}
         self._seen_vehicle_tracks = set()
 
+        # 始终尝试自动检测停止线，成功则覆盖 YAML 默认值
+        self._try_auto_detect_stop_line(source)
+
         self.video_thread = VideoThread(source, self.config)
         self.video_thread.frame_ready.connect(self._on_frame_ready)
         self.video_thread.stats_updated.connect(self._on_stats_updated)
@@ -1523,19 +1595,84 @@ class MainWindow(QMainWindow):
 
         self._push_detection_settings_to_runtime()
 
+        # 持久化：写入 settings.yaml，避免重载时回退
+        save_config_section(
+            'config/settings.yaml', 'violation', 'stop_line',
+            {'y': y_global, 'x_start': x_start, 'x_end': x_end},
+        )
+
         # 友好提示
         _styled_info(
             self._tr.tr("stopline_title"),
             self._tr.tr("stopline_ok", y=y_global, x1=x_start, x2=x_end),
         )
 
+    def _try_auto_detect_stop_line(self, source: str):
+        """启动处理前自动检测停止线（静默模式，多帧尝试，不弹窗）。"""
+        import logging
+        _log = logging.getLogger(__name__)
+        import cv2 as _cv2
+        try:
+            cap = _cv2.VideoCapture(int(source) if str(source).isdigit() else source)
+            if not cap.isOpened():
+                _log.debug("Auto stop-line: cannot open source %s", source)
+                return
+            # 尝试多帧：摄像头首帧常为黑屏，视频首帧可能没有停止线
+            result = None
+            for _ in range(30):
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                result = detect_stop_line(frame)
+                if result is not None:
+                    break
+            cap.release()
+            if result is None:
+                _log.debug("Auto stop-line: not found in first 30 frames of %s", source)
+                return
+            y, x1, x2 = result
+            self.config['stop_line'] = {'y': y, 'x_start': x1, 'x_end': x2}
+            # 持久化：写入 settings.yaml，避免重载时回退
+            save_config_section(
+                'config/settings.yaml', 'violation', 'stop_line',
+                {'y': y, 'x_start': x1, 'x_end': x2},
+            )
+            self._suppress_settings_apply = True
+            try:
+                self.spin_sl_y.setValue(y)
+                self.spin_sl_x1.setValue(x1)
+                self.spin_sl_x2.setValue(x2)
+                self.cb_enable_stopline.setChecked(True)
+            finally:
+                self._suppress_settings_apply = False
+            _log.info("Auto stop-line detected: y=%d x=[%d,%d]", y, x1, x2)
+        except Exception:
+            _log.debug("Auto stop-line detection failed", exc_info=True)
+
+    def _toggle_pause(self):
+        """暂停 / 继续 切换"""
+        if not self.video_thread or not self.video_thread.isRunning():
+            return
+        if self._is_paused:
+            self.video_thread.resume()
+            self._is_paused = False
+            self._set_live_badge(True)
+            self.statusBar.showMessage(self._tr.tr("status_processing"))
+        else:
+            self.video_thread.pause()
+            self._is_paused = True
+            self._set_live_badge(False)
+            self.statusBar.showMessage(self._tr.tr("status_paused"))
+        self._sync_controls_for_state()
+
     def _stop_video(self):
-        """Stop processing"""
+        """Stop processing (complete stop, release resources)."""
         if self.video_thread:
             self.video_thread.stop()
             self.video_thread = None
 
         self._is_processing = False
+        self._is_paused = False
         self._plate_cache = {}
         self._seen_vehicle_tracks = set()
         if getattr(self, '_db_cleanup', None) is not None:
@@ -1551,6 +1688,12 @@ class MainWindow(QMainWindow):
         self.btn_open.setEnabled(not running)
         self.btn_camera.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        if running and self._is_paused:
+            self.btn_stop.setText(self._tr.tr("btn_resume"))
+        elif running:
+            self.btn_stop.setText(self._tr.tr("btn_pause"))
+        else:
+            self.btn_stop.setText(self._tr.tr("btn_stop"))
 
     def _on_frame_ready(self, frame: np.ndarray, tracks: list,
                         features_list: list, violations: list,

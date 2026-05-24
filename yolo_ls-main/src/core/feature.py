@@ -171,7 +171,8 @@ class SpeedCalculator:
         dx = history[-1][0] - history[0][0]
         dy = history[-1][1] - history[0][1]
 
-        if abs(dx) < 5 and abs(dy) < 5:
+        # 欧氏距离 < 3 像素视为静止
+        if np.sqrt(dx * dx + dy * dy) < 3:
             return Direction.UNKNOWN
 
         angle = np.arctan2(-dy, dx) * 180 / np.pi  # 注意 y 轴向下

@@ -71,7 +71,8 @@ class VehicleDetector:
                  tiling_overlap: float = 0.20,
                  tiling_min_dets: int = DEFAULT_TILING_MIN_DETS,
                  tiling_interval: int = DEFAULT_TILING_INTERVAL_FRAMES,
-                 tiling_mode: str = "strip"):
+                 tiling_mode: str = "strip",
+                 vehicle_classes: Optional[Dict[int, str]] = None):
         """
         初始化检测器
 
@@ -88,11 +89,22 @@ class VehicleDetector:
             tiling_min_dets: 常规检测结果少于该值时触发切片兜底
             tiling_interval: 切片兜底最少间隔帧数（降低开销）
             tiling_mode: strip=仅上半幅2块(快) / full=完整网格(慢但更全)
+            vehicle_classes: 自定义车辆类别映射 {class_id: name}；None 使用默认 COCO 映射
         """
         resolved, fallback = resolve_yolo_model(model_path)
         if fallback:
             logger.warning("Vehicle detector using fallback weights; fine-tune for traffic classes")
         self.model = YOLO(resolved)
+        # 允许通过 settings.yaml 的 detector.classes 自定义车辆类别
+        # 支持 list[int]（从模型 names 自动查名称）或 dict[int, str]
+        if vehicle_classes is not None:
+            if isinstance(vehicle_classes, dict):
+                self.VEHICLE_CLASSES = dict(vehicle_classes)
+            else:
+                self.VEHICLE_CLASSES = {
+                    int(cid): self.model.names.get(int(cid), f'class_{cid}')
+                    for cid in vehicle_classes
+                }
         self._frame_index = 0
         self.confidence = confidence
         self.iou_threshold = iou_threshold
@@ -293,16 +305,14 @@ class VehicleDetector:
         for cls_id, items in by_cls.items():
             items = sorted(items, key=lambda d: d.confidence, reverse=True)
             kept: List[Detection] = []
-            kept_boxes = np.empty((0, 4), dtype=np.float64)
+            kept_box_list: List[List[float]] = []  # 收集列表，最后批量构建 np 数组
             for d in items:
-                if kept_boxes.size > 0:
-                    overlaps = iou_xyxy_batch(d.bbox, kept_boxes) >= iou_thr
+                if kept_box_list:
+                    overlaps = iou_xyxy_batch(d.bbox, np.array(kept_box_list, dtype=np.float64)) >= iou_thr
                     if np.any(overlaps):
                         continue
                 kept.append(d)
-                kept_boxes = np.vstack([kept_boxes, d.bbox]) if kept_boxes.size else np.array(
-                    [d.bbox], dtype=np.float64
-                )
+                kept_box_list.append(list(d.bbox))
             merged.extend(kept)
         return merged
 
@@ -310,20 +320,5 @@ class VehicleDetector:
         """仅检测车辆"""
         return self.detect(frame, list(self.VEHICLE_CLASSES.keys()))
 
-    def detect_traffic_lights(self, frame: np.ndarray) -> List[Detection]:
-        """检测交通灯"""
-        return self.detect(frame, [self.TRAFFIC_LIGHT_CLASS])
-
-    def detect_persons(self, frame: np.ndarray) -> List[Detection]:
-        """检测人员（用于交警识别）"""
-        return self.detect(frame, [self.PERSON_CLASS])
-
-    def detect_all(self, frame: np.ndarray) -> Tuple[List[Detection], List[Detection]]:
-        """检测车辆和交通灯"""
-        all_classes = list(self.VEHICLE_CLASSES.keys()) + [self.TRAFFIC_LIGHT_CLASS]
-        all_detections = self.detect(frame, all_classes)
-
-        vehicles = [d for d in all_detections if d.class_id in self.VEHICLE_CLASSES]
-        traffic_lights = [d for d in all_detections if d.class_id == self.TRAFFIC_LIGHT_CLASS]
-
-        return vehicles, traffic_lights
+    # detect_traffic_lights / detect_persons / detect_all 已删除（未被使用）
+    # 上下文检测由 VideoThread / main.py 直接调用 detect() 并自行分类

@@ -19,6 +19,7 @@ class VideoStream:
         fps: int = 15,
         width: int = 1280,
         height: int = 720,
+        resize: Optional[Tuple[int, int]] = None,
     ) -> None:
         """
         初始化视频流
@@ -28,11 +29,15 @@ class VideoStream:
             fps: 目标帧率
             width: 视频宽度
             height: 视频高度
+            resize: 可选的目标尺寸 (w, h)，读帧时缩放
         """
         self.source: VideoSource = int(source) if str(source).isdigit() else source
         self.target_fps = fps
         self.width = width
         self.height = height
+        self.resize_dims: Optional[Tuple[int, int]] = (
+            tuple(int(v) for v in resize) if resize else None
+        )
         self.cap: Optional[cv2.VideoCapture] = None
         self.frame_count = 0
         self.is_file = False
@@ -64,6 +69,8 @@ class VideoStream:
         if self.cap is None:
             return False, None
         ret, frame = self.cap.read()
+        if ret and self.resize_dims is not None:
+            frame = cv2.resize(frame, self.resize_dims, interpolation=cv2.INTER_LINEAR)
         if ret:
             self.frame_count += 1
         return ret, frame
