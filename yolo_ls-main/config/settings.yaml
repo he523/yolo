@@ -28,7 +28,7 @@ detector:
   confidence: 0.2
   iou_threshold: 0.45
   # 远处小目标增强：更高推理分辨率 + 自适应切片兜底
-  imgsz: 768           # 实时优先建议 640/768；越大越准但更慢
+  imgsz: 640           # 实时优先建议 640/768；越大越准但更慢
   max_det: 300
   enable_tiling: false # 切片会明显变慢；需要远处小车更准再打开
   tiling_mode: strip   # strip=仅上半幅(快) / full=完整网格(慢)
@@ -61,7 +61,7 @@ violation:
   speeding_enabled: true
   wrong_way_enabled: true
   illegal_lane_enabled: true
-  expected_flow_direction: south  # 合法车流主方向 north/south/east/west 等
+  expected_flow_direction: north  # 合法车流主方向 north/south/east/west 等
   lane_change_lateral_px: 80
   lane_change_min_speed_kmh: 15
   speed_limit: 60  # km/h
