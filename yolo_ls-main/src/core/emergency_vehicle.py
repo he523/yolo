@@ -2,7 +2,7 @@
 import logging
 import cv2
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 from enum import Enum
 
@@ -56,13 +56,15 @@ class EmergencyVehicleDetector:
         'blue': [(100, 150, 150), (130, 255, 255)],
     }
 
-    def __init__(self, min_light_area: int = 100):
+    def __init__(self, config: Optional[Dict] = None):
         """
         初始化检测器
         Args:
-            min_light_area: 警示灯最小面积阈值
+            config: 可选配置字典（来自 YAML emergency_vehicle 节）
         """
-        self.min_light_area = min_light_area
+        cfg = config or {}
+        self.min_light_area = cfg.get('min_light_area', 100)
+        self._color_threshold = cfg.get('color_threshold', 0.08)
         self.prev_frame = None
         self.light_history = {}  # 用于检测闪烁
 

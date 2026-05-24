@@ -8,6 +8,7 @@
 - 异常情况单独保存截图，便于后续人工审核
 """
 import logging
+import time
 import cv2
 import numpy as np
 from pathlib import Path
@@ -33,8 +34,12 @@ from src.utils.hsv import bgr_to_hsv_normalized
 from .emergency_vehicle import EmergencyVehicleDetector, EmergencyVehicle, EmergencyVehicleType
 from .feature import Direction
 from .lane_violation import LaneViolationAnalyzer, build_analyzer_from_violation_config
+from .traffic_light_cls import TrafficLightClassifier
 
 logger = logging.getLogger(__name__)
+
+# 同一车辆同一违规类型的最短重复记录间隔（秒）
+VIOLATION_COOLDOWN_SEC = 30.0
 
 
 class ViolationType(Enum):
@@ -119,16 +124,65 @@ ExemptionReason = AnomalyReason
 EXEMPTION_DESCRIPTIONS = ANOMALY_DESCRIPTIONS
 
 
+def select_best_light_bbox(
+    light_dets: List,
+    stop_line_y: Optional[int] = None,
+    frame_h: int = 720,
+    frame_w: int = 1280,
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    从多个红绿灯检测结果中选择最优的一个。
+
+    优先策略：
+    1. 若已知停止线 Y 坐标，选离停止线最近的灯（同方向最近灯）
+    2. 否则选画面下半部分且面积最大的灯（通常为当前车道的灯）
+    3. 兜底：选置信度最高的
+    """
+    if not light_dets:
+        return None
+    if len(light_dets) == 1:
+        return light_dets[0].bbox
+
+    def _area(det) -> int:
+        x1, y1, x2, y2 = det.bbox
+        return max(0, (x2 - x1) * (y2 - y1))
+
+    def _center_y(det) -> float:
+        _, y1, _, y2 = det.bbox
+        return (y1 + y2) / 2.0
+
+    if stop_line_y is not None:
+        # 选中心 Y 坐标离停止线最近的灯
+        return min(light_dets, key=lambda d: abs(_center_y(d) - stop_line_y)).bbox
+
+    # 无停止线：优先画面下部 60% 区域内的灯，综合面积和置信度
+    lower_half = [d for d in light_dets if _center_y(d) > frame_h * 0.4]
+    candidates = lower_half if lower_half else light_dets
+
+    return max(candidates, key=lambda d: _area(d) * d.confidence).bbox
+
+
 class TrafficPoliceDetector:
     """交警检测器（基于颜色和姿态特征）"""
 
-    def __init__(self):
+    def __init__(self, config: Optional[Dict] = None):
+        cfg = config or {}
         # 交警制服颜色特征 (HSV) - 深蓝色/黑色
-        self.uniform_lower = np.array([100, 50, 30])
-        self.uniform_upper = np.array([130, 255, 150])
+        self.uniform_lower = np.array([
+            cfg.get('uniform_hue_low', 100),
+            cfg.get('uniform_sat_low', 50),
+            cfg.get('uniform_val_low', 30),
+        ])
+        self.uniform_upper = np.array([cfg.get('uniform_hue_high', 130), 255, 150])
         # 反光背心颜色 - 荧光黄/绿
-        self.vest_lower = np.array([25, 100, 100])
-        self.vest_upper = np.array([45, 255, 255])
+        self.vest_lower = np.array([
+            cfg.get('vest_hue_low', 25),
+            cfg.get('vest_sat_low', 100),
+            cfg.get('vest_val_low', 100),
+        ])
+        self.vest_upper = np.array([cfg.get('vest_hue_high', 45), 255, 255])
+        self._color_threshold = cfg.get('color_threshold', COLOR_RATIO_THRESHOLD)
+        self._uniform_threshold = cfg.get('uniform_threshold', COLOR_RATIO_THRESHOLD * 2)
 
     def detect(self, frame: np.ndarray,
                person_bboxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
@@ -162,42 +216,43 @@ class TrafficPoliceDetector:
             uniform_ratio = np.sum(uniform_mask > 0) / total
 
             # 如果有反光背心或制服特征，认为是交警
-            if vest_ratio > COLOR_RATIO_THRESHOLD or uniform_ratio > COLOR_RATIO_THRESHOLD * 2:
+            if vest_ratio > self._color_threshold or uniform_ratio > self._uniform_threshold:
                 police_bboxes.append(bbox)
 
         return police_bboxes
 
 
 class TrafficLightDetector:
-    """交通灯状态检测器"""
+    """交通灯状态检测器（CNN 优先，HSV 回退）"""
 
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
         # HSV 范围：可通过 YAML traffic_light 节覆盖
+        # 默认值已针对过曝 LED 放宽（更低饱和度/明度阈值，更宽色调范围）
         self.red_lower1 = np.array([
             cfg.get('red_hue_low1', 0),
-            cfg.get('red_sat_low', 60),
-            cfg.get('red_val_low', 60),
+            cfg.get('red_sat_low', 30),
+            cfg.get('red_val_low', 40),
         ])
-        self.red_upper1 = np.array([cfg.get('red_hue_high1', 10), 255, 255])
+        self.red_upper1 = np.array([cfg.get('red_hue_high1', 15), 255, 255])
         self.red_lower2 = np.array([
-            cfg.get('red_hue_low2', 160),
-            cfg.get('red_sat_low', 60),
-            cfg.get('red_val_low', 60),
+            cfg.get('red_hue_low2', 155),
+            cfg.get('red_sat_low', 30),
+            cfg.get('red_val_low', 40),
         ])
         self.red_upper2 = np.array([cfg.get('red_hue_high2', 180), 255, 255])
         self.green_lower = np.array([
-            cfg.get('green_hue_low', 45),
-            cfg.get('green_sat_low', 60),
-            cfg.get('green_val_low', 60),
+            cfg.get('green_hue_low', 40),
+            cfg.get('green_sat_low', 30),
+            cfg.get('green_val_low', 40),
         ])
-        self.green_upper = np.array([cfg.get('green_hue_high', 85), 255, 255])
+        self.green_upper = np.array([cfg.get('green_hue_high', 90), 255, 255])
         self.yellow_lower = np.array([
-            cfg.get('yellow_hue_low', 15),
-            cfg.get('yellow_sat_low', 60),
-            cfg.get('yellow_val_low', 60),
+            cfg.get('yellow_hue_low', 10),
+            cfg.get('yellow_sat_low', 30),
+            cfg.get('yellow_val_low', 40),
         ])
-        self.yellow_upper = np.array([cfg.get('yellow_hue_high', 40), 255, 255])
+        self.yellow_upper = np.array([cfg.get('yellow_hue_high', 45), 255, 255])
         self.state_history = deque(maxlen=cfg.get('malfunction_window', 10) * 3)
         self._color_threshold = cfg.get('color_threshold', TRAFFIC_LIGHT_COLOR_THRESHOLD)
         self._malfunction_window = cfg.get('malfunction_window', 10)
@@ -210,9 +265,35 @@ class TrafficLightDetector:
         self._malfunction_engaged = False   # 故障锁存
         self._malfunction_clear_counter = 0 # 连续正常帧计数（锁存后）
 
+        # CNN 分类器（优先使用，不可用时回退 HSV）
+        self._use_model = bool(cfg.get('use_model', False))
+        self._cnn_conf_threshold = float(cfg.get('cnn_conf_threshold', 0.6))
+        self._cnn_classifier: Optional[TrafficLightClassifier] = None
+        if self._use_model:
+            model_path = cfg.get('model_path', 'models/traffic_light_cls.pt')
+            try:
+                self._cnn_classifier = TrafficLightClassifier(model_path)
+                if not self._cnn_classifier.is_available:
+                    logger.warning(
+                        "TrafficLightDetector: CNN model not available, using HSV fallback"
+                    )
+                    self._cnn_classifier = None
+            except Exception as exc:
+                logger.warning(
+                    "TrafficLightDetector: failed to load CNN model: %s — using HSV fallback", exc
+                )
+                self._cnn_classifier = None
+
+        # 时序平滑与红灯持续帧数追踪
+        self._smooth_window = max(3, int(cfg.get('smooth_window', 5)))
+        self._red_frame_counter = 0          # 红灯已持续帧数
+        self._min_red_frames = int(cfg.get('min_red_frames', 3))  # 判定闯红灯所需的最小红灯持续帧数
+        # CLAHE 预处理开关
+        self._use_clahe = bool(cfg.get('use_clahe', True))
+
     def detect_state(self, frame: np.ndarray,
                      bbox: Tuple[int, int, int, int]) -> str:
-        """检测交通灯状态（HSV + 竖长外形 + 上中下灯珠分区）"""
+        """检测交通灯状态（CNN 优先，HSV 回退）"""
         fh, fw = frame.shape[:2]
         clamped = clamp_bbox(bbox, fw, fh)
         if clamped is None:
@@ -222,6 +303,14 @@ class TrafficLightDetector:
         if roi.size == 0:
             return 'unknown'
 
+        # ---- 优先使用 CNN 分类器 ----
+        if self._cnn_classifier is not None:
+            cnn_state, cnn_conf = self._cnn_classifier.classify(frame, clamped)
+            if cnn_state != 'unknown' and cnn_conf >= self._cnn_conf_threshold:
+                self.state_history.append(cnn_state)
+                return cnn_state
+            # CNN 置信度不足，回退 HSV（不记录 unknown 到 history）
+
         aspect = (x2 - x1) / max(1, (y2 - y1))
         is_vertical = TRAFFIC_LIGHT_MIN_ASPECT <= aspect <= TRAFFIC_LIGHT_MAX_ASPECT
         is_horizontal = (1.0 / TRAFFIC_LIGHT_MAX_ASPECT) <= aspect <= (1.0 / TRAFFIC_LIGHT_MIN_ASPECT)
@@ -229,23 +318,17 @@ class TrafficLightDetector:
         if not (is_vertical or is_horizontal):
             return self._color_vote(roi)
 
-        hsv = bgr_to_hsv_normalized(roi)
+        hsv = bgr_to_hsv_normalized(roi, use_clahe=self._use_clahe)
         if is_vertical:
-            # 竖灯：上红 / 中黄 / 下绿
+            # 竖灯：上红 / 中黄 / 下绿，每段用亮度峰值定位灯体核心区域
             h = roi.shape[0]
-            bands = [
-                hsv[0: max(1, h // 3), :],
-                hsv[max(1, h // 3): max(2, 2 * h // 3), :],
-                hsv[max(2, 2 * h // 3):, :],
-            ]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            bands = self._split_bands_with_peak(hsv, gray, axis=0, num_bands=3)
         else:
             # 横灯：左红 / 中黄 / 右绿
             w = roi.shape[1]
-            bands = [
-                hsv[:, 0: max(1, w // 3)],
-                hsv[:, max(1, w // 3): max(2, 2 * w // 3)],
-                hsv[:, max(2, 2 * w // 3):],
-            ]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            bands = self._split_bands_with_peak(hsv, gray, axis=1, num_bands=3)
 
         band_states = []
         for band in bands:
@@ -260,7 +343,83 @@ class TrafficLightDetector:
             state = self._color_vote(roi)
 
         self.state_history.append(state)
+        self._update_red_counter(state)
         return state
+
+    def get_smoothed_state(self) -> str:
+        """返回最近 N 帧的多数投票状态，用于闯红灯判定时的时序平滑。"""
+        if len(self.state_history) == 0:
+            return 'unknown'
+        recent = list(self.state_history)[-self._smooth_window:]
+        from collections import Counter
+        return Counter(recent).most_common(1)[0][0]
+
+    def red_duration_frames(self) -> int:
+        """返回红灯已持续帧数（用于确认红灯在越线前已亮起）。"""
+        return self._red_frame_counter
+
+    def _update_red_counter(self, state: str) -> None:
+        """更新红灯持续帧数计数器。"""
+        if state == 'red':
+            self._red_frame_counter += 1
+        else:
+            self._red_frame_counter = 0
+
+    def _split_bands_with_peak(
+        self, hsv: np.ndarray, gray: np.ndarray,
+        axis: int = 0, num_bands: int = 3, peak_margin: float = 0.15,
+    ) -> list:
+        """
+        沿指定轴将 ROI 分为 num_bands 段，每段内用亮度峰值定位灯体核心区域，
+        避免粗暴三等分将灯杆/外壳误判为灯体。
+
+        Args:
+            hsv: HSV 颜色空间 ROI
+            gray: 灰度 ROI（用于亮度峰值检测）
+            axis: 0=垂直分带（竖灯），1=水平分带（横灯）
+            num_bands: 分段数（默认 3：红/黄/绿）
+            peak_margin: 峰值周围保留的边距比例
+
+        Returns:
+            HSV band 切片列表
+        """
+        length = hsv.shape[axis]
+        band_size = length // num_bands
+        if band_size < 2:
+            # ROI 太小，回退到简单均分
+            bands = []
+            for i in range(num_bands):
+                start = i * max(1, length // num_bands)
+                end = (i + 1) * max(1, length // num_bands) if i < num_bands - 1 else length
+                if axis == 0:
+                    bands.append(hsv[start:max(start + 1, end), :])
+                else:
+                    bands.append(hsv[:, start:max(start + 1, end)])
+            return bands
+
+        bands = []
+        # 沿 axis 计算亮度投影
+        proj = gray.mean(axis=1 - axis) if axis == 0 else gray.mean(axis=0)
+
+        for i in range(num_bands):
+            start = i * band_size
+            end = (i + 1) * band_size if i < num_bands - 1 else length
+            segment = proj[start:end]
+            if segment.size == 0:
+                continue
+            peak_offset = int(np.argmax(segment))
+            peak_center = start + peak_offset
+            half = max(2, int(band_size * peak_margin))
+            crop_start = max(start, peak_center - half)
+            crop_end = min(end, peak_center + half + 1)
+            if crop_end <= crop_start:
+                crop_start, crop_end = start, end
+            if axis == 0:
+                bands.append(hsv[crop_start:crop_end, :])
+            else:
+                bands.append(hsv[:, crop_start:crop_end])
+
+        return bands
 
     def _dominant_color_on_band(self, hsv_band: np.ndarray) -> str:
         total = hsv_band.shape[0] * hsv_band.shape[1]
@@ -279,12 +438,12 @@ class TrafficLightDetector:
         }
         best = max(ratios, key=ratios.get)
         if ratios[best] < self._color_threshold:
-            return 'unknown'
+            return self._mean_hue_fallback(hsv_band)
         return best
 
     def _color_vote(self, roi: np.ndarray) -> str:
         """整 ROI 颜色投票（无竖长外形时的回退）。"""
-        hsv = bgr_to_hsv_normalized(roi)
+        hsv = bgr_to_hsv_normalized(roi, use_clahe=self._use_clahe)
         total = roi.shape[0] * roi.shape[1]
         if total <= 0:
             return 'unknown'
@@ -301,9 +460,40 @@ class TrafficLightDetector:
         }
         best = max(ratios, key=ratios.get)
         if ratios[best] < self._color_threshold:
-            return 'unknown'
-        # state_history 由外层 detect_state() 统一追加，避免重复计数
+            return self._mean_hue_fallback(hsv)
         return best
+
+    def _mean_hue_fallback(self, hsv_roi: np.ndarray) -> str:
+        """
+        圆形均值色调回退：当所有颜色 mask 占比都不足阈值时（LED 过曝场景），
+        用非暗非亮像素的圆形平均色调（circular mean）做分类。
+
+        使用单位圆上的向量平均（atan2），正确处理红色跨越 0° 边界的情况。
+        OpenCV H ∈ [0,179]，映射到 [0, 2π) 后计算圆形均值。
+        """
+        h = hsv_roi[:, :, 0].astype(np.float32)
+        s = hsv_roi[:, :, 1].astype(np.float32)
+        v = hsv_roi[:, :, 2].astype(np.float32)
+        # 排除过暗（V<40）和过亮过曝低饱和（V>240 & S<15）的像素
+        valid = (v > 40) & ~((v > 240) & (s < 15)) & (s > 8)
+        if np.sum(valid) < 5:
+            return 'unknown'
+        hue_vals = h[valid]
+        # OpenCV H ∈ [0, 179]，映射到弧度 [0, 2π)
+        rad = hue_vals * (np.pi / 90.0)  # 乘 2 再乘 π/180 = π/90
+        cos_sum = float(np.sum(np.cos(rad)))
+        sin_sum = float(np.sum(np.sin(rad)))
+        # 圆形均值角度（弧度），映射回 OpenCV H 空间
+        mean_rad = np.arctan2(sin_sum, cos_sum)
+        mean_h = (mean_rad * 90.0 / np.pi) % 180.0
+        # 分类：红 ~0°/180°, 黄 ~30°, 绿 ~60°（OpenCV H 空间）
+        if mean_h <= 18 or mean_h >= 160:
+            return 'red'
+        elif 18 < mean_h <= 48:
+            return 'yellow'
+        elif 48 < mean_h <= 95:
+            return 'green'
+        return 'unknown'
 
     def is_malfunctioning(self) -> bool:
         """检测信号灯是否故障（带滞回消抖，避免短暂遮挡误触发）。"""
@@ -346,6 +536,7 @@ class TrafficLightDetector:
         self._malfunction_latch = 0
         self._malfunction_engaged = False
         self._malfunction_clear_counter = 0
+        self._red_frame_counter = 0
 
 
 class StopLine:
@@ -388,7 +579,9 @@ class AdaptiveViolationDetector:
                  expected_flow_direction: str = "south",
                  lane_change_lateral_px: int = DEFAULT_LANE_CHANGE_LATERAL_PX,
                  lane_change_min_speed_kmh: float = DEFAULT_LANE_CHANGE_MIN_SPEED_KMH,
-                 traffic_light_config: Optional[Dict] = None):
+                 traffic_light_config: Optional[Dict] = None,
+                 emergency_vehicle_config: Optional[Dict] = None,
+                 traffic_police_config: Optional[Dict] = None):
         self.speed_limit = speed_limit
         self.stop_line = stop_line
         self.snapshot_dir = Path(snapshot_dir)
@@ -415,12 +608,12 @@ class AdaptiveViolationDetector:
 
         # 子模块
         self.traffic_light_detector = TrafficLightDetector(traffic_light_config)
-        self.emergency_detector = EmergencyVehicleDetector()
-        self.police_detector = TrafficPoliceDetector()
+        self.emergency_detector = EmergencyVehicleDetector(emergency_vehicle_config)
+        self.police_detector = TrafficPoliceDetector(traffic_police_config)
 
         # 状态
         self.track_history: Dict[int, deque] = {}
-        self.recorded_violations: Dict[int, set] = {}
+        self.recorded_violations: Dict[int, Dict] = {}
         self.current_light_state = 'unknown'
         self.current_emergency_vehicles: List[EmergencyVehicle] = []
         self.current_police_bboxes: List[Tuple[int, int, int, int]] = []
@@ -428,6 +621,12 @@ class AdaptiveViolationDetector:
         # 统计
         self.total_violations = 0
         self.anomaly_count = 0
+
+        # 停止线动态重检测
+        tl_cfg = traffic_light_config or {}
+        self._stop_line_redetect_interval = int(tl_cfg.get('stop_line_redetect_interval', 0))
+        self._stop_line_auto_detect = bool(tl_cfg.get('stop_line_auto_detect', False))
+        self._frame_count = 0
 
     def set_stop_line(self, y: int, x_start: int, x_end: int):
         """设置停止线"""
@@ -438,6 +637,8 @@ class AdaptiveViolationDetector:
                person_bboxes: List[Tuple[int, int, int, int]] = None,
                light_bbox: Optional[Tuple[int, int, int, int]] = None):
         """更新检测器状态"""
+        self._frame_count += 1
+
         if light_bbox:
             self.current_light_state = self.traffic_light_detector.detect_state(
                 frame, light_bbox
@@ -456,6 +657,20 @@ class AdaptiveViolationDetector:
         else:
             self.current_police_bboxes = []
 
+        # 停止线动态重检测（适应相机微小移动）
+        if (self._stop_line_auto_detect
+            and self._stop_line_redetect_interval > 0
+            and self._frame_count % self._stop_line_redetect_interval == 0):
+            from src.utils.stop_line_detect import detect_stop_line
+            result = detect_stop_line(frame)
+            if result is not None:
+                y, x_start, x_end = result
+                self.stop_line = StopLine(y, x_start, x_end)
+                logger.debug(
+                    "Stop line re-detected at y=%d x=[%d, %d] (frame %d)",
+                    y, x_start, x_end, self._frame_count,
+                )
+
     def check_violation(self,
                         track_id: int,
                         bbox: Tuple[int, int, int, int],
@@ -465,6 +680,7 @@ class AdaptiveViolationDetector:
                         direction: Optional[Direction] = None) -> Optional[ViolationRecord]:
         """检查单个车辆的违规行为"""
         fh, fw = frame.shape[:2]
+        self.lane_analyzer.set_frame_scale(fh)
         clamped = clamp_bbox(bbox, fw, fh)
         if clamped is None:
             return None
@@ -473,27 +689,30 @@ class AdaptiveViolationDetector:
 
         if track_id not in self.track_history:
             self.track_history[track_id] = deque(maxlen=self.track_history_maxlen)
-            self.recorded_violations[track_id] = set()
+            self.recorded_violations[track_id] = {}
 
         history = self.track_history[track_id]
 
         violation_type = None
         violation_speed = None
 
-        if self.speeding_enabled and speed > self.speed_limit:
-            if ViolationType.SPEEDING not in self.recorded_violations[track_id]:
-                violation_type = ViolationType.SPEEDING
-                violation_speed = speed
-
+        # 优先级：闯红灯 > 超速 > 逆行 > 违规变道
+        # 使用平滑后的灯态，并确认红灯在车辆越线前已亮起足够帧数
+        smoothed_state = self.traffic_light_detector.get_smoothed_state()
         if (self.red_light_enabled and
-            violation_type is None and
             self.stop_line and
             len(history) > 0 and
-            self.current_light_state == 'red'):
+            smoothed_state == 'red' and
+            self.traffic_light_detector.red_duration_frames() >= self.traffic_light_detector._min_red_frames):
             prev_center = history[-1]
             if self.stop_line.is_crossed(prev_center, center):
-                if ViolationType.RED_LIGHT not in self.recorded_violations[track_id]:
+                if self._can_record(track_id, ViolationType.RED_LIGHT):
                     violation_type = ViolationType.RED_LIGHT
+
+        if violation_type is None and self.speeding_enabled and speed > self.speed_limit:
+            if self._can_record(track_id, ViolationType.SPEEDING):
+                violation_type = ViolationType.SPEEDING
+                violation_speed = speed
 
         trajectory = list(history) + [center]
         lane_result = self.lane_analyzer.analyze(
@@ -507,7 +726,7 @@ class AdaptiveViolationDetector:
         if (
             violation_type is None
             and lane_result.is_wrong_way
-            and ViolationType.WRONG_WAY not in self.recorded_violations[track_id]
+            and self._can_record(track_id, ViolationType.WRONG_WAY)
         ):
             violation_type = ViolationType.WRONG_WAY
             violation_speed = speed
@@ -515,7 +734,7 @@ class AdaptiveViolationDetector:
         if (
             violation_type is None
             and lane_result.is_illegal_lane_change
-            and ViolationType.ILLEGAL_LANE not in self.recorded_violations[track_id]
+            and self._can_record(track_id, ViolationType.ILLEGAL_LANE)
         ):
             violation_type = ViolationType.ILLEGAL_LANE
             violation_speed = speed
@@ -556,8 +775,15 @@ class AdaptiveViolationDetector:
         if is_anomaly:
             self.anomaly_count += 1
 
-        self.recorded_violations[track_id].add(violation_type)
+        self.recorded_violations[track_id][violation_type] = time.time()
         return record
+
+    def _can_record(self, track_id: int, vtype: ViolationType) -> bool:
+        """检查是否可记录该违规（冷却时间未过则跳过）。"""
+        last = self.recorded_violations.get(track_id, {}).get(vtype)
+        if last is None:
+            return True
+        return (time.time() - last) >= VIOLATION_COOLDOWN_SEC
 
     def _check_anomaly(self, vehicle_bbox: Tuple[int, int, int, int]
                        ) -> Tuple[bool, AnomalyReason, List[str]]:
@@ -663,6 +889,13 @@ class AdaptiveViolationDetector:
             del self.track_history[track_id]
         if track_id in self.recorded_violations:
             del self.recorded_violations[track_id]
+
+    def cleanup_stale_tracks(self, active_ids: set) -> int:
+        """清理已消失的 track 历史，返回清理数量。"""
+        stale = [tid for tid in self.track_history if tid not in active_ids]
+        for tid in stale:
+            self.clear_track(tid)
+        return len(stale)
 
     def draw_annotations(self, frame: np.ndarray) -> np.ndarray:
         """在帧上绘制标注"""

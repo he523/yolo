@@ -351,6 +351,58 @@ class VideoThread(QThread):
                 tiling_mode=self.config.get('tiling_mode', 'strip'),
                 vehicle_classes=self.config.get('vehicle_classes'),
             )
+            # 如果车辆检测模型不包含 traffic light 类，尝试使用 COCO 模型做上下文检测
+            self.context_detector = None
+            if not self.detector.has_traffic_light_class():
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                # 按优先级查找本地已有的 COCO 模型（不触发下载，避免网络超时）
+                _coco_candidates = ['models/yolo12n.pt', 'models/yolo11n.pt', 'models/yolov8n.pt']
+                _coco_path = None
+                for _c in _coco_candidates:
+                    if Path(_c).exists():
+                        _coco_path = _c
+                        break
+                if _coco_path:
+                    _log.info("Primary model lacks traffic-light class; using %s for context detection", _coco_path)
+                    self.context_detector = VehicleDetector(
+                        model_path=_coco_path,
+                        confidence=0.1,
+                        device=self.config.get('device', 'cpu'),
+                        imgsz=self.config.get('imgsz', 768),
+                        enable_tiling=False,
+                    )
+                else:
+                    # 本地没有 → 尝试通过 ultralytics 自动下载（首次会下载约 6 MB，后续缓存）
+                    _coco_path = None
+                    try:
+                        from ultralytics import YOLO
+                        _m = YOLO('yolo12n.pt')
+                        _src = Path(_m.ckpt_path) if hasattr(_m, 'ckpt_path') and _m.ckpt_path else None
+                        if _src and Path(_src).exists():
+                            import shutil
+                            _dst = Path('models/yolo12n.pt')
+                            _dst.parent.mkdir(parents=True, exist_ok=True)
+                            if not _dst.exists():
+                                shutil.copy2(_src, _dst)
+                            _coco_path = str(_dst)
+                            _log.info("Auto-downloaded COCO model -> %s", _coco_path)
+                    except Exception as _exc:
+                        _log.warning("Cannot auto-download yolo12n.pt: %s", _exc)
+                    if _coco_path:
+                        _log.info("Primary model lacks traffic-light class; using %s for context detection", _coco_path)
+                        self.context_detector = VehicleDetector(
+                            model_path=_coco_path,
+                            confidence=0.1,
+                            device=self.config.get('device', 'cpu'),
+                            imgsz=self.config.get('imgsz', 768),
+                            enable_tiling=False,
+                        )
+                    else:
+                        _log.warning(
+                            "Traffic light detection unavailable — no COCO model found and auto-download failed. "
+                            "Place yolo12n.pt in models/ to enable."
+                        )
 
             self.tracker = ByteTracker(
                 track_thresh=self.config.get('track_thresh', 0.5),
@@ -363,6 +415,10 @@ class VideoThread(QThread):
                 pixel_to_meter=self.config.get('pixel_to_meter', 0.05),
                 fps=self.config.get('fps', 15)
             )
+            # 使用实际视频帧率覆盖配置文件值
+            actual_fps = self.video_stream.get_fps()
+            if actual_fps > 0:
+                self.feature_extractor.set_fps(actual_fps)
 
             self.violation_detector = AdaptiveViolationDetector(
                 speed_limit=self.config.get('speed_limit', 60),
@@ -376,6 +432,8 @@ class VideoThread(QThread):
                 lane_change_lateral_px=self.config.get('lane_change_lateral_px', 80),
                 lane_change_min_speed_kmh=self.config.get('lane_change_min_speed_kmh', 15),
                 traffic_light_config=self.config.get('traffic_light_config'),
+                emergency_vehicle_config=self.config.get('emergency_vehicle_config'),
+                traffic_police_config=self.config.get('traffic_police_config'),
             )
 
             self.interaction_graph = None
@@ -478,16 +536,21 @@ class VideoThread(QThread):
                     or self.config.get('stop_line')
                 )
                 if enable_context:
-                    # 车辆 + 人 + 信号灯一次性检测（比三次 predict 快很多）
-                    all_classes = list(self.detector.VEHICLE_CLASSES.keys()) + [
-                        self.detector.PERSON_CLASS,
-                        self.detector.TRAFFIC_LIGHT_CLASS,
-                    ]
-                    all_dets = self.detector.detect(frame, all_classes)
-                    vehicle_dets = [d for d in all_dets if d.class_id in self.detector.VEHICLE_CLASSES]
-                    person_bboxes = [d.bbox for d in all_dets if d.class_id == self.detector.PERSON_CLASS]
-                    light_dets = [d for d in all_dets if d.class_id == self.detector.TRAFFIC_LIGHT_CLASS]
-                    light_bbox = max(light_dets, key=lambda d: d.confidence).bbox if light_dets else None
+                    # 车辆正常阈值，红绿灯和人用更低的置信度（红绿灯在画面中占比极小）
+                    vehicle_dets = self.detector.detect_vehicles(frame)
+                    ctx = self.context_detector if self.context_detector is not None else self.detector
+                    ctx_dets = ctx.detect(
+                        frame,
+                        [ctx.PERSON_CLASS, ctx.TRAFFIC_LIGHT_CLASS],
+                        conf=0.1,
+                    )
+                    person_bboxes = [d.bbox for d in ctx_dets if d.class_id == ctx.PERSON_CLASS]
+                    light_dets = [d for d in ctx_dets if d.class_id == ctx.TRAFFIC_LIGHT_CLASS]
+                    # 多灯路口：优先选离停止线最近的灯
+                    from src.core.adaptive_violation import select_best_light_bbox
+                    stop_y = self.violation_detector.stop_line.y if self.violation_detector.stop_line else None
+                    fh, fw = frame.shape[:2]
+                    light_bbox = select_best_light_bbox(light_dets, stop_line_y=stop_y, frame_h=fh, frame_w=fw)
                 else:
                     vehicle_dets = self.detector.detect_vehicles(frame)
                     person_bboxes = []
@@ -605,6 +668,12 @@ class VideoThread(QThread):
                     )
 
                 self.frame_ready.emit(annotated_frame, tracks, features_list, violations, collision_risks, plate_results)
+
+                # 定期清理已消失 track 的历史（防止内存泄漏）
+                if frame_count % 150 == 0:
+                    active_ids = {t.track_id for t in tracks}
+                    self.violation_detector.cleanup_stale_tracks(active_ids)
+                    self.feature_extractor.cleanup_stale_tracks(active_ids)
 
                 if frame_count % 30 == 0:
                     stats = self.violation_detector.get_statistics()
@@ -779,6 +848,8 @@ class MainWindow(QMainWindow):
         feature = cfg.get('feature', {})
         gui = cfg.get('gui', {})
         tl = cfg.get('traffic_light', {})
+        ev = cfg.get('emergency_vehicle', {})
+        tp = cfg.get('traffic_police', {})
         self.config.update({
             'fps': video.get('fps', self.config['fps']),
             'model_path': det.get('model_path', self.config['model_path']),
@@ -853,6 +924,8 @@ class MainWindow(QMainWindow):
             'database_pool_size': db.get('pool_size', self.config.get('database_pool_size', 5)),
             'gui_language': gui.get('language', self.config.get('gui_language', 'zh_CN')),
             'traffic_light_config': tl,
+            'emergency_vehicle_config': ev,
+            'traffic_police_config': tp,
         })
 
     def _apply_config_to_controls(self):
@@ -1123,7 +1196,7 @@ class MainWindow(QMainWindow):
         self.video_label.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding,
         )
-        self.video_label.setScaledContents(True)
+        self.video_label.setScaledContents(False)
         self.video_label.setAlignment(Qt.AlignCenter)
         video_frame_layout.addWidget(self.video_label)
         left_layout.addWidget(video_frame, stretch=1)
@@ -1303,15 +1376,11 @@ class MainWindow(QMainWindow):
         self.db_table.setEditTriggers(self.db_table.NoEditTriggers)
         vehicles_layout.addWidget(self.db_table)
 
-        # 底部：按天清理旧记录
+        # 底部：清空当前所选表的所有记录
         clean_layout = QHBoxLayout()
         self.db_clean_label = QLabel()
         clean_layout.addWidget(self.db_clean_label)
-        self.db_clean_days_spin = QSpinBox()
-        self.db_clean_days_spin.setRange(1, 365)
-        self.db_clean_days_spin.setValue(30)
         self.db_clean_btn = QPushButton()
-        clean_layout.addWidget(self.db_clean_days_spin)
         clean_layout.addWidget(self.db_clean_btn)
         clean_layout.addStretch()
         vehicles_layout.addLayout(clean_layout)
@@ -1685,8 +1754,9 @@ class MainWindow(QMainWindow):
     def _sync_controls_for_state(self):
         """根据处理状态同步控件启用/禁用（避免误操作）"""
         running = bool(self.video_thread and self.video_thread.isRunning()) or self._is_processing
-        self.btn_open.setEnabled(not running)
-        self.btn_camera.setEnabled(not running)
+        # 打开视频/摄像头始终可用（内部会先停止旧线程再切换）
+        self.btn_open.setEnabled(True)
+        self.btn_camera.setEnabled(True)
         self.btn_stop.setEnabled(running)
         if running and self._is_paused:
             self.btn_stop.setText(self._tr.tr("btn_resume"))
@@ -2080,11 +2150,11 @@ class MainWindow(QMainWindow):
         self._refresh_db_table()
 
     def _clean_old_db_records(self):
-        """按天清理旧记录（车辆 + 违规 + 流量）"""
-        days = self.db_clean_days_spin.value()
+        """清空当前所选数据库表的所有记录"""
+        table = self.db_table_combo.currentText()
         box = QMessageBox(self)
         box.setWindowTitle(self._tr.tr("db_confirm_clean_title"))
-        box.setText(self._tr.tr("db_confirm_clean", days=days))
+        box.setText(self._tr.tr("db_confirm_clean_table", table=table))
         box.setIcon(QMessageBox.Question)
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
@@ -2093,12 +2163,13 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         try:
-            self.database.clear_old_records(days=days)
+            deleted = self.database.clear_table(table)
         except Exception as exc:
             QMessageBox.critical(self, self._tr.tr("db_error_title"), str(exc))
             return
         QMessageBox.information(
-            self, self._tr.tr("clean_complete_title"), self._tr.tr("clean_done", days=days),
+            self, self._tr.tr("clean_complete_title"),
+            self._tr.tr("clean_done_table", table=table, count=deleted),
         )
         self._refresh_db_table()
 

@@ -115,15 +115,23 @@ class SpeedCalculator:
         """
         self.pixel_to_meter = pixel_to_meter
         self.fps = fps
+        self.depth_factor = 3.0  # 画面顶部车辆的 p2m 放大倍数上限
         self.track_history: Dict[int, deque] = {}
 
-    def update(self, track_id: int, center: Tuple[int, int]) -> float:
+    def set_fps(self, fps: float) -> None:
+        """更新实际帧率（视频源切换或运行时检测到实际 FPS 变化时调用）。"""
+        if fps > 0:
+            self.fps = fps
+
+    def update(self, track_id: int, center: Tuple[int, int],
+               frame_height: int = 0) -> float:
         """
-        更新跟踪点并计算速度
+        更新跟踪点并计算速度（中值滤波 + 静止死区 + 异常值剔除 + 深度缩放）。
 
         Args:
             track_id: 跟踪 ID
-            center: 当前中心点
+            center: 当前中心点 (cx, cy)
+            frame_height: 帧高度（用于深度缩放，0=不缩放）
 
         Returns:
             速度 (km/h)
@@ -137,15 +145,37 @@ class SpeedCalculator:
         if len(history) < 2:
             return 0.0
 
-        # 计算最近几帧的平均速度
-        total_dist = 0.0
+        # 计算所有帧间位移（像素）
+        displacements = []
         for i in range(1, len(history)):
             dx = history[i][0] - history[i - 1][0]
             dy = history[i][1] - history[i - 1][1]
-            total_dist += np.sqrt(dx ** 2 + dy ** 2)
+            displacements.append(np.sqrt(dx ** 2 + dy ** 2))
 
-        avg_pixel_speed = total_dist / (len(history) - 1)  # 像素/帧
-        meter_per_second = avg_pixel_speed * self.pixel_to_meter * self.fps
+        # 中值作为基准（抗抖动）
+        sorted_disp = sorted(displacements)
+        n = len(sorted_disp)
+        median_disp = sorted_disp[n // 2] if n % 2 else (sorted_disp[n // 2 - 1] + sorted_disp[n // 2]) / 2
+
+        # 静止死区：中值位移 < 3px 视为静止
+        if median_disp < 3.0:
+            return 0.0
+
+        # 异常值过滤：剔除 > 5× 中位数的跳变帧
+        filtered = [d for d in displacements if d <= median_disp * 5.0]
+        if not filtered:
+            filtered = [median_disp]
+
+        # 深度缩放：画面顶部车辆像素代表更多实际距离
+        p2m = self.pixel_to_meter
+        if frame_height > 0:
+            cy = center[1]
+            # y 越小（越靠近画面顶部/远处）→ 放大系数越大
+            depth_scale = 1.0 + self.depth_factor * max(0.0, 1.0 - cy / frame_height)
+            p2m *= depth_scale
+
+        avg_pixel_speed = sum(filtered) / len(filtered)
+        meter_per_second = avg_pixel_speed * p2m * self.fps
         km_per_hour = meter_per_second * 3.6
 
         return km_per_hour
@@ -202,6 +232,13 @@ class SpeedCalculator:
         if track_id in self.track_history:
             del self.track_history[track_id]
 
+    def cleanup_stale_tracks(self, active_ids: set) -> int:
+        """清理已消失的 track 历史，返回清理数量。"""
+        stale = [tid for tid in self.track_history if tid not in active_ids]
+        for tid in stale:
+            del self.track_history[tid]
+        return len(stale)
+
 
 class FeatureExtractor:
     """特征提取器"""
@@ -230,8 +267,8 @@ class FeatureExtractor:
         x1, y1, x2, y2 = bbox
         center = ((x1 + x2) // 2, (y1 + y2) // 2)
 
-        # 速度计算
-        speed = self.speed_calculator.update(track_id, center)
+        # 速度计算（传入帧高度用于深度缩放）
+        speed = self.speed_calculator.update(track_id, center, frame.shape[0])
 
         # 方向判断
         direction = self.speed_calculator.get_direction(track_id)
@@ -244,3 +281,11 @@ class FeatureExtractor:
             direction=direction,
             bbox=bbox
         )
+
+    def set_fps(self, fps: float) -> None:
+        """更新实际帧率。"""
+        self.speed_calculator.set_fps(fps)
+
+    def cleanup_stale_tracks(self, active_ids: set) -> int:
+        """清理已消失 track 的速度历史。"""
+        return self.speed_calculator.cleanup_stale_tracks(active_ids)

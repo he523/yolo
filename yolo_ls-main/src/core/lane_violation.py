@@ -115,6 +115,20 @@ class LaneViolationAnalyzer:
     ):
         self.wrong_way_config = wrong_way_config or WrongWayConfig()
         self.lane_change_config = lane_change_config or IllegalLaneChangeConfig()
+        self._base_lateral_shift = self.lane_change_config.lateral_shift_px
+        self._base_max_jump = self.lane_change_config.max_lateral_jump_px
+        self._base_forward_disp = self.lane_change_config.min_forward_displacement_px
+        self._base_net_disp = self.wrong_way_config.min_net_displacement_px
+
+    def set_frame_scale(self, frame_height: int) -> None:
+        """根据帧高度缩放横向阈值（以 720p 为基准）。"""
+        if frame_height <= 0:
+            return
+        scale = frame_height / 720.0
+        self.lane_change_config.lateral_shift_px = self._base_lateral_shift * scale
+        self.lane_change_config.max_lateral_jump_px = self._base_max_jump * scale
+        self.lane_change_config.min_forward_displacement_px = self._base_forward_disp * scale
+        self.wrong_way_config.min_net_displacement_px = self._base_net_disp * scale
 
     def analyze(
         self,
@@ -209,7 +223,7 @@ class LaneViolationAnalyzer:
         threshold = cfg.direction_threshold_deg
         if diff > (180.0 - threshold):
             conf = min(1.0, (diff - (180.0 - threshold)) / max(threshold, 1.0))
-            return True, max(0.5, conf)
+            return True, conf
         return False, 0.0
 
     def detect_illegal_lane_change(

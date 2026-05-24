@@ -54,9 +54,8 @@ class VehicleDetector:
         7: 'truck'
     }
 
-    # 交通灯类别
+    # 默认 COCO 类 ID（会被 __init__ 自动检测覆盖）
     TRAFFIC_LIGHT_CLASS = 9
-    # 人员类别（用于交警检测输入）
     PERSON_CLASS = 0
 
     def __init__(self,
@@ -95,6 +94,8 @@ class VehicleDetector:
         if fallback:
             logger.warning("Vehicle detector using fallback weights; fine-tune for traffic classes")
         self.model = YOLO(resolved)
+        # 自动检测模型中的 person / traffic light 类 ID
+        self._auto_detect_context_classes()
         # 允许通过 settings.yaml 的 detector.classes 自定义车辆类别
         # 支持 list[int]（从模型 names 自动查名称）或 dict[int, str]
         if vehicle_classes is not None:
@@ -119,14 +120,34 @@ class VehicleDetector:
         self.tiling_interval = max(1, int(tiling_interval))
         self.tiling_mode = (tiling_mode or "strip").lower()
 
+    def _auto_detect_context_classes(self):
+        """从模型 class names 自动检测 person 和 traffic light 的类 ID。"""
+        for cid, cname in self.model.names.items():
+            cn = str(cname).lower()
+            if 'person' in cn:
+                self.PERSON_CLASS = int(cid)
+                logger.info("Auto-detected PERSON class: id=%d name=%s", cid, cname)
+            if 'traffic' in cn and 'light' in cn:
+                self.TRAFFIC_LIGHT_CLASS = int(cid)
+                logger.info("Auto-detected TRAFFIC_LIGHT class: id=%d name=%s", cid, cname)
+
+    def has_traffic_light_class(self) -> bool:
+        """当前模型是否包含 traffic light 类别。"""
+        return any(
+            'traffic' in str(n).lower() and 'light' in str(n).lower()
+            for n in self.model.names.values()
+        )
+
     def detect(self, frame: np.ndarray,
-               classes: Optional[List[int]] = None) -> List[Detection]:
+               classes: Optional[List[int]] = None,
+               conf: Optional[float] = None) -> List[Detection]:
         """
         检测图像中的目标
 
         Args:
             frame: BGR 格式的图像帧
             classes: 要检测的类别ID列表，None 表示检测所有车辆类别
+            conf: 覆盖默认置信度阈值（None=使用 self.confidence）。用于红绿灯等小目标检测
 
         Returns:
             检测结果列表
@@ -135,7 +156,7 @@ class VehicleDetector:
             classes = list(self.VEHICLE_CLASSES.keys())
 
         self._frame_index += 1
-        detections = self._predict_frame(frame, classes)
+        detections = self._predict_frame(frame, classes, conf=conf)
         # 自适应切片兜底：降频 + 默认仅上半幅条带（比 2x2 全图快约 2–4 倍）
         run_tiling = (
             self.enable_tiling
@@ -143,17 +164,18 @@ class VehicleDetector:
             and (self._frame_index % self.tiling_interval == 0)
         )
         if run_tiling:
-            tiled = self._predict_tiled(frame, classes)
+            tiled = self._predict_tiled(frame, classes, conf=conf)
             if tiled:
                 detections = self._merge_detections(detections + tiled, iou_thr=0.55)
 
         return detections
 
-    def _predict_frame(self, frame: np.ndarray, classes: List[int]) -> List[Detection]:
+    def _predict_frame(self, frame: np.ndarray, classes: List[int],
+                        conf: Optional[float] = None) -> List[Detection]:
         """对整帧做一次常规 YOLO 推理。"""
         results = self.model.predict(
             frame,
-            conf=self.confidence,
+            conf=conf if conf is not None else self.confidence,
             iou=self.iou_threshold,
             classes=classes,
             device=self.device,
@@ -165,8 +187,10 @@ class VehicleDetector:
         fh, fw = frame.shape[:2]
         return self._results_to_detections(results, frame_w=fw, frame_h=fh)
 
-    def _predict_tiled(self, frame: np.ndarray, classes: List[int]) -> List[Detection]:
+    def _predict_tiled(self, frame: np.ndarray, classes: List[int],
+                       conf: Optional[float] = None) -> List[Detection]:
         """切片推理；strip 模式仅处理画面上半区（远处小目标常见区域）。"""
+        _conf = conf if conf is not None else self.confidence
         h, w = frame.shape[:2]
         if self.tiling_mode == "strip":
             return self._predict_strip_tiles(frame, classes, h, w)
@@ -193,7 +217,7 @@ class VehicleDetector:
                 tile = frame[y1:y2, x1:x2]
                 results = self.model.predict(
                     tile,
-                    conf=max(0.05, self.confidence * 0.85),  # 切片略降阈值，提高召回
+                    conf=max(0.05, _conf * 0.85),  # 切片略降阈值，提高召回
                     iou=self.iou_threshold,
                     classes=classes,
                     device=self.device,
@@ -240,7 +264,7 @@ class VehicleDetector:
                 continue
             results = self.model.predict(
                 tile,
-                conf=max(0.05, self.confidence * 0.85),
+                conf=max(0.05, _conf * 0.85),
                 iou=self.iou_threshold,
                 classes=classes,
                 device=self.device,

@@ -99,22 +99,24 @@ violation:
 # ---------------------------------------------------------------------------
 traffic_light:
   # HSV 检测参数（色调 H / 饱和度 S / 明度 V）
+  # 注意：LED 红绿灯在摄像头中通常过曝发白（低饱和度），因此 sat_low/val_low 设置较低，
+  # hue 范围已适度放宽以覆盖过曝导致的色偏。
   red_hue_low1: 0
-  red_hue_high1: 10
-  red_hue_low2: 160
+  red_hue_high1: 15
+  red_hue_low2: 155
   red_hue_high2: 180
-  red_sat_low: 60
-  red_val_low: 60
-  green_hue_low: 45
-  green_hue_high: 85
-  green_sat_low: 60
-  green_val_low: 60
-  yellow_hue_low: 15
-  yellow_hue_high: 40
-  yellow_sat_low: 60
-  yellow_val_low: 60
+  red_sat_low: 20
+  red_val_low: 35
+  green_hue_low: 40
+  green_hue_high: 90
+  green_sat_low: 20
+  green_val_low: 35
+  yellow_hue_low: 10
+  yellow_hue_high: 45
+  yellow_sat_low: 20
+  yellow_val_low: 35
   # 颜色判定阈值（目标颜色像素占总 ROI 比例低于此值视为 unknown）
-  color_threshold: 0.06
+  color_threshold: 0.04
   # 竖灯宽高比范围（width/height）
   vertical_aspect_min: 0.25
   vertical_aspect_max: 0.55
@@ -122,6 +124,45 @@ traffic_light:
   malfunction_window: 10     # 滑动窗口帧数
   malfunction_unknown_ratio: 0.8  # unknown 占比 ≥ 此值触发故障
   malfunction_change_count: 6     # 窗口内状态变化 ≥ 此值触发故障
+  # CNN 分类器（训练后启用，自动替换 HSV 判定）
+  use_model: true           # 设为 true 启用 CNN 分类器（需先训练模型）
+  model_path: models/traffic_light_cls.pt  # CNN 模型权重路径
+  cnn_conf_threshold: 0.6     # CNN 置信度阈值，低于此值回退 HSV
+  # 时序平滑参数
+  smooth_window: 5            # 平滑窗口帧数，取最近 N 帧多数投票结果
+  min_red_frames: 3           # 判定闯红灯所需的最小红灯持续帧数（防止黄变红瞬间误判）
+  # CLAHE 预处理开关（过曝场景可关闭以保留原始颜色）
+  use_clahe: true
+  # 停止线动态重检测（0=关闭，>0=每隔N帧自动重检测，适应相机微小移动）
+  stop_line_auto_detect: false
+  stop_line_redetect_interval: 300
+
+# ---------------------------------------------------------------------------
+#  特种车辆检测（HSV 参数可按场景调优）
+# ---------------------------------------------------------------------------
+emergency_vehicle:
+  # 颜色判定阈值（目标颜色像素占总 ROI 比例低于此值视为不匹配）
+  color_threshold: 0.08
+  # 警示灯最小面积（像素）
+  min_light_area: 100
+
+# ---------------------------------------------------------------------------
+#  交警检测（HSV 参数可按场景调优）
+# ---------------------------------------------------------------------------
+traffic_police:
+  # 反光背心颜色 (HSV) — 荧光黄/绿
+  vest_hue_low: 25
+  vest_hue_high: 45
+  vest_sat_low: 100
+  vest_val_low: 100
+  # 制服颜色 (HSV) — 深蓝/黑
+  uniform_hue_low: 100
+  uniform_hue_high: 130
+  uniform_sat_low: 50
+  uniform_val_low: 30
+  # 颜色判定阈值
+  color_threshold: 0.08
+  uniform_threshold: 0.16
 
 # ---------------------------------------------------------------------------
 #  车牌识别 (OCR)

@@ -155,6 +155,7 @@ def run_cli(args):
         tiling_mode=det_cfg.get('tiling_mode', 'strip'),
         vehicle_classes=det_cfg.get('classes'),
     )
+    context_detector = None
     tracker = ByteTracker(
         track_thresh=tracker_cfg.get('track_thresh', 0.5),
         track_buffer=tracker_cfg.get('track_buffer', 30),
@@ -177,6 +178,8 @@ def run_cli(args):
         lane_change_lateral_px=vio_cfg.get('lane_change_lateral_px', 80),
         lane_change_min_speed_kmh=vio_cfg.get('lane_change_min_speed_kmh', 15),
         traffic_light_config=config.get('traffic_light'),
+        emergency_vehicle_config=config.get('emergency_vehicle'),
+        traffic_police_config=config.get('traffic_police'),
     )
     # 如果在配置中预先定义了停止线，则启用闯红灯检测
     stop_line_cfg = vio_cfg.get('stop_line')
@@ -192,6 +195,48 @@ def run_cli(args):
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("Invalid stop_line in config: %s", exc)
+
+    # 上下文检测器：用于红绿灯和行人检测。
+    # 如果车辆主模型不包含 traffic light 类，优先本地 COCO 模型，最后尝试自动下载。
+    if enable_context_detection and not detector.has_traffic_light_class():
+        import logging as _logging2
+        _log2 = _logging2.getLogger(__name__)
+        _coco_candidates = ['models/yolo12n.pt', 'models/yolo11n.pt', 'models/yolov8n.pt']
+        _coco_path = None
+        for _c in _coco_candidates:
+            if Path(_c).exists():
+                _coco_path = _c
+                break
+        if not _coco_path:
+            # 本地没有 → 尝试通过 ultralytics 自动下载（首次会下载约 6 MB，后续缓存）
+            try:
+                from ultralytics import YOLO
+                _m = YOLO('yolo12n.pt')
+                _src = Path(_m.ckpt_path) if hasattr(_m, 'ckpt_path') and _m.ckpt_path else None
+                if _src and Path(_src).exists():
+                    import shutil
+                    _dst = Path('models/yolo12n.pt')
+                    _dst.parent.mkdir(parents=True, exist_ok=True)
+                    if not _dst.exists():
+                        shutil.copy2(_src, _dst)
+                    _coco_path = str(_dst)
+                    _log2.info("Auto-downloaded COCO model -> %s", _coco_path)
+            except Exception as _exc:
+                _log2.warning("Cannot auto-download yolo12n.pt: %s", _exc)
+        if _coco_path:
+            _log2.info("Primary model lacks traffic-light class; using %s for context detection", _coco_path)
+            context_detector = VehicleDetector(
+                model_path=_coco_path,
+                confidence=0.1,
+                device=args.device,
+                imgsz=base_imgsz,
+                enable_tiling=False,
+            )
+        else:
+            _log2.warning(
+                "Traffic light detection unavailable — no COCO model found and auto-download failed. "
+                "Place yolo12n.pt in models/ to enable."
+            )
 
     plate_reader = None
     if ocr_cfg.get('enabled', True) and int(ocr_cfg.get('interval', 15)) > 0:
@@ -238,6 +283,7 @@ def run_cli(args):
         fps = video.get_fps()
         if fps <= 0:
             fps = config.get('video', {}).get('fps', 15)
+        feature_extractor.set_fps(fps)  # 使用实际帧率
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
         if not writer.isOpened():
@@ -310,17 +356,23 @@ def run_cli(args):
         )
         risk_active = risk_enabled and not (perf_enabled and perf.risk_disabled())
 
-        # 检测与跟踪（性能优化：尽量单次推理，避免每帧多次 predict）
+        # 检测与跟踪（车辆正常阈值，红绿灯和人用低阈值提高召回）
         if enable_context_detection:
-            all_classes = list(detector.VEHICLE_CLASSES.keys()) + [
-                detector.PERSON_CLASS,
-                detector.TRAFFIC_LIGHT_CLASS,
-            ]
-            all_dets = detector.detect(frame, all_classes)
-            detections = [d for d in all_dets if d.class_id in detector.VEHICLE_CLASSES]
-            person_bboxes = [d.bbox for d in all_dets if d.class_id == detector.PERSON_CLASS]
-            light_dets = [d for d in all_dets if d.class_id == detector.TRAFFIC_LIGHT_CLASS]
-            light_bbox = max(light_dets, key=lambda d: d.confidence).bbox if light_dets else None
+            detections = detector.detect_vehicles(frame)
+            # 上下文目标（人、红绿灯）使用更低置信度——红绿灯在画面中通常 < 0.1% 像素
+            ctx = context_detector if context_detector is not None else detector
+            ctx_dets = ctx.detect(
+                frame,
+                [ctx.PERSON_CLASS, ctx.TRAFFIC_LIGHT_CLASS],
+                conf=0.1,
+            )
+            person_bboxes = [d.bbox for d in ctx_dets if d.class_id == ctx.PERSON_CLASS]
+            light_dets = [d for d in ctx_dets if d.class_id == ctx.TRAFFIC_LIGHT_CLASS]
+            # 多灯路口：优先选离停止线最近的灯，而不是仅看置信度
+            from src.core.adaptive_violation import select_best_light_bbox
+            stop_y = violation_detector.stop_line.y if violation_detector.stop_line else None
+            fh, fw = frame.shape[:2]
+            light_bbox = select_best_light_bbox(light_dets, stop_line_y=stop_y, frame_h=fh, frame_w=fw)
         else:
             detections = detector.detect_vehicles(frame)
             person_bboxes = []
@@ -459,6 +511,8 @@ def run_cli(args):
                 seen_tracks &= current_track_ids
             if len(plate_cache) > _plate_cache_max:
                 plate_cache = {tid: plate_cache[tid] for tid in current_track_ids if tid in plate_cache}
+            violation_detector.cleanup_stale_tracks(current_track_ids)
+            feature_extractor.cleanup_stale_tracks(current_track_ids)
 
         if frame_count % 30 == 0 and frame_tracks:
             avg_speed = sum(item['speed_kmh'] for item in frame_tracks) / len(frame_tracks)

@@ -557,6 +557,24 @@ class Database:
                 self._trim_table_to_max_rows(cursor, table, 'id', max_rows)
             cursor.execute('VACUUM')
 
+    def clear_table(self, table: str) -> int:
+        """
+        清空指定表的所有记录，并重置自增序列。
+        返回被删除的行数。
+        """
+        allowed = {'vehicles', 'violations', 'traffic_flow'}
+        if table not in allowed:
+            raise ValueError(f"不允许清空的表: {table}，仅支持 {allowed}")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+            row = cursor.fetchone()
+            count = row[0] if row else 0
+            cursor.execute(f"DELETE FROM {table}")
+            self._reset_autoincrement_if_empty(cursor, table)
+            logger.info("Cleared table '%s': %d rows deleted.", table, count)
+            return count
+
     @staticmethod
     def _reset_autoincrement_if_empty(cursor: sqlite3.Cursor, table: str) -> None:
         """

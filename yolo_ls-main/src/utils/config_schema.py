@@ -60,7 +60,8 @@ DEFAULT_CONFIG: ConfigDict = {
 }
 
 _KNOWN_TOP_LEVEL = frozenset(DEFAULT_CONFIG) | frozenset(
-    {"gui", "violation", "ocr", "database", "risk", "feature", "traffic_light"}
+    {"gui", "violation", "ocr", "database", "risk", "feature",
+     "traffic_light", "emergency_vehicle", "traffic_police"}
 )
 
 
@@ -317,7 +318,7 @@ def validate_config(cfg: Optional[ConfigDict], *, strict_unknown: bool = False) 
         risk.get("ttc_thresholds"), "risk.ttc_thresholds"
     )
 
-    for section in ("gui", "traffic_light"):
+    for section in ("gui", "traffic_light", "emergency_vehicle", "traffic_police"):
         if section in merged:
             sec = merged[section]
             if sec is not None and not isinstance(sec, dict):

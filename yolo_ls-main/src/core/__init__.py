@@ -13,7 +13,8 @@ from .lane_violation import (
 from .emergency_vehicle import EmergencyVehicleDetector, EmergencyVehicle, EmergencyVehicleType
 from .adaptive_violation import (
     AdaptiveViolationDetector, ViolationRecord, ExemptionReason,
-    EXEMPTION_DESCRIPTIONS, ViolationType as AdaptiveViolationType
+    EXEMPTION_DESCRIPTIONS, ViolationType as AdaptiveViolationType,
+    select_best_light_bbox,
 )
 from .stgat import VehicleInteractionGraph, SpatioTemporalGAT
 from .collision_risk import CollisionRiskPredictor, CollisionRisk, RiskLevel

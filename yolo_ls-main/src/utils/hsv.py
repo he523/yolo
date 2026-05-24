@@ -3,12 +3,19 @@ import cv2
 import numpy as np
 
 
-def normalize_roi_for_hsv(roi: np.ndarray) -> np.ndarray:
+def normalize_roi_for_hsv(roi: np.ndarray, use_clahe: bool = True) -> np.ndarray:
     """
     对 ROI 做 CLAHE 亮度均衡，减轻光照变化对 HSV 阈值的影响。
     返回 BGR 图像（与输入通道一致）。
+
+    Args:
+        roi: BGR 或灰度 ROI 图像
+        use_clahe: 是否使用 CLAHE；过曝 LED 场景可设为 False 保留原始颜色
     """
     if roi is None or roi.size == 0:
+        return roi
+
+    if not use_clahe:
         return roi
 
     if len(roi.shape) == 2:
@@ -25,7 +32,7 @@ def normalize_roi_for_hsv(roi: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
 
-def bgr_to_hsv_normalized(roi: np.ndarray) -> np.ndarray:
-    """CLAHE 后再转 HSV。"""
-    normalized = normalize_roi_for_hsv(roi)
+def bgr_to_hsv_normalized(roi: np.ndarray, use_clahe: bool = True) -> np.ndarray:
+    """CLAHE 后再转 HSV（可通过 use_clahe=False 跳过 CLAHE）。"""
+    normalized = normalize_roi_for_hsv(roi, use_clahe=use_clahe)
     return cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
